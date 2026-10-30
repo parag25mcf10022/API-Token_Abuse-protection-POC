@@ -109,8 +109,9 @@ const FAQ = [
 ];
 
 // --- rule handlers -------------------------------------------------------
-// Each returns a string (handled) or null (not my job). Order matters:
-// specific commands first, fuzzy/FAQ matching last.
+// Each returns a string (handled), { reply, cache: false } for answers that
+// change over time and must not be cached, or null (not my job). Order
+// matters: specific commands first, fuzzy/FAQ matching last.
 const RULES = [
   // explicit commands: "calc 2+3*4"
   (raw) => {
@@ -147,10 +148,10 @@ const RULES = [
   // time / date
   (raw, norm) => {
     if (/\b(what.*time|current time|^time$)\b/.test(norm)) {
-      return `It is ${new Date().toLocaleTimeString()}.`;
+      return { reply: `It is ${new Date().toLocaleTimeString()}.`, cache: false };
     }
     if (/\b(what.*date|today.*date|^date$)\b/.test(norm)) {
-      return `Today is ${new Date().toLocaleDateString()}.`;
+      return { reply: `Today is ${new Date().toLocaleDateString()}.`, cache: false };
     }
     return null;
   },
@@ -210,8 +211,9 @@ async function generate(message, opts = {}) {
   for (const rule of RULES) {
     const out = rule(raw, norm);
     if (out) {
-      cacheSet(norm, { reply: out, source: 'rule' });
-      return { reply: out, source: 'rule' };
+      const reply = typeof out === 'string' ? out : out.reply;
+      if (out.cache !== false) cacheSet(norm, { reply, source: 'rule' });
+      return { reply, source: 'rule' };
     }
   }
 
