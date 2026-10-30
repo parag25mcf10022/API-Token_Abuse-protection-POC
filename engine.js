@@ -255,13 +255,15 @@ function classify(message) {
 }
 
 /** Try the local FAQ by keyword overlap; returns {answer, score} best match. */
-function faqMatch(norm, entries = FAQ) {
+// Product FAQ needs 2 keyword hits (its keywords are generic); category tips
+// use distinctive keywords ("xss", "regex"), so 1 hit is enough.
+function faqMatch(norm, entries = FAQ, minHits = 2) {
   // Tokenize on word chars so trailing punctuation ("stolen?") still matches.
   const words = new Set(norm.match(/[a-z0-9]+/g) || []);
   let best = null;
   for (const item of entries) {
     const hits = item.keywords.filter((k) => words.has(k)).length;
-    if (hits >= 2 && (!best || hits > best.score)) best = { answer: item.answer, score: hits };
+    if (hits >= minHits && (!best || hits > best.score)) best = { answer: item.answer, score: hits };
   }
   return best;
 }
@@ -295,7 +297,7 @@ async function generate(message, opts = {}) {
   }
 
   // 3. local FAQ retrieval
-  const faq = faqMatch(norm, FAQ) || faqMatch(norm, CATEGORY_KB);
+  const faq = faqMatch(norm, FAQ) || faqMatch(norm, CATEGORY_KB, 1);
   if (faq) {
     cacheSet(norm, { reply: faq.answer, source: 'faq' });
     return { reply: faq.answer, source: 'faq' };
