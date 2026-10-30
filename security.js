@@ -39,6 +39,10 @@ const API_KEY_RE = /^ak_[0-9a-f]{48}$/;
 
 const isApiKey = (v) => typeof v === 'string' && API_KEY_RE.test(v);
 
+// Org master keys: same shape with an "mk_" prefix.
+const MASTER_KEY_RE = /^mk_[0-9a-f]{48}$/;
+const isMasterKey = (v) => typeof v === 'string' && MASTER_KEY_RE.test(v);
+
 // Passwords are hashed, never displayed, so any characters are fine — only
 // enforce type and a length cap (bounds scrypt work per request).
 const isPassword = (v) =>
@@ -139,6 +143,7 @@ module.exports = {
   cleanText,
   cleanEmail,
   isApiKey,
+  isMasterKey,
   isPassword,
   passwordProblem,
   securityHeaders,

@@ -177,12 +177,89 @@ const RULES = [
   (raw, norm) => (/\b(thanks|thank you|thx|ty)\b/.test(norm) ? "You're welcome!" : null),
 ];
 
+// --- category knowledge (coding / cyber / design / data) -------------------
+// Short, defensive, general-purpose answers so each content category has
+// something useful locally. Anything deeper falls through to the optional LLM.
+const CATEGORY_KB = [
+  { keywords: ['debug', 'bug', 'error', 'exception', 'stack', 'trace'],
+    answer: 'Debugging tip: reproduce the bug with the smallest input, read the full stack trace from the top frame in your code, and add a failing test before fixing it.' },
+  { keywords: ['regex', 'regular', 'expression', 'pattern'],
+    answer: 'Regex tip: anchor patterns with ^ and $, prefer explicit character classes over .*, and test against both matching and non-matching samples.' },
+  { keywords: ['api', 'rest', 'endpoint', 'http', 'json'],
+    answer: 'API tip: version your endpoints, validate every input server-side, return consistent error shapes, and never put secrets in URLs.' },
+  { keywords: ['xss', 'cross', 'site', 'scripting', 'escape', 'sanitize'],
+    answer: 'XSS defense: encode output for its context (HTML, attribute, JS, URL), render untrusted data with textContent, and add a strict Content-Security-Policy.' },
+  { keywords: ['sql', 'injection', 'nosql', 'query', 'parameterized'],
+    answer: 'Injection defense: use parameterized queries, validate input types (strings must be strings), and never build queries by string concatenation.' },
+  { keywords: ['password', 'hash', 'hashing', 'bcrypt', 'scrypt', 'argon2'],
+    answer: 'Password storage: use a slow, salted KDF such as Argon2id, scrypt, or bcrypt — never plain SHA or MD5 — and rate-limit login attempts.' },
+  { keywords: ['phishing', 'malware', 'ransomware', 'threat', 'incident'],
+    answer: 'Incident basics: isolate affected systems, rotate exposed credentials and API keys, preserve logs for analysis, and notify your security team.' },
+  { keywords: ['color', 'colour', 'palette', 'contrast', 'accessible', 'accessibility'],
+    answer: 'Colour tip: keep body text contrast at least 4.5:1 (WCAG AA), limit the palette to a few roles (primary, accent, neutral), and never rely on colour alone.' },
+  { keywords: ['font', 'typography', 'typeface', 'heading', 'readability'],
+    answer: 'Typography tip: use one or two typefaces, a consistent type scale, 45–75 characters per line, and a line height around 1.4–1.6 for body text.' },
+  { keywords: ['layout', 'grid', 'spacing', 'responsive', 'whitespace'],
+    answer: 'Layout tip: build on a consistent spacing scale (e.g. 4/8 px), align to a grid, and design mobile-first so content reflows gracefully.' },
+  { keywords: ['average', 'mean', 'median', 'statistics', 'outlier'],
+    answer: 'Stats tip: report the median alongside the mean when data is skewed, and check for outliers before drawing conclusions.' },
+  { keywords: ['csv', 'spreadsheet', 'dataset', 'clean', 'cleaning'],
+    answer: 'Data cleaning tip: standardize types and units first, handle missing values explicitly, and keep the raw data untouched alongside the cleaned copy.' },
+  { keywords: ['chart', 'graph', 'visualization', 'visualisation', 'plot'],
+    answer: 'Chart tip: pick the chart for the question — bars to compare, lines for trends over time — start bar axes at zero, and label units.' },
+];
+
+// --- content classification -----------------------------------------------
+// Decides which content category (scope) a message belongs to, BEFORE it is
+// processed, so the API can enforce per-key scopes and per-category limits.
+const CATEGORY_KEYWORDS = {
+  coding: ['code', 'coding', 'program', 'programming', 'function', 'bug', 'debug', 'error',
+    'exception', 'stack', 'compile', 'javascript', 'typescript', 'python', 'java', 'golang',
+    'rust', 'node', 'regex', 'api', 'endpoint', 'json', 'git', 'sql', 'class', 'variable',
+    'algorithm', 'refactor', 'library', 'framework'],
+  cyber: ['security', 'secure', 'vulnerability', 'vulnerabilities', 'xss', 'csrf', 'injection',
+    'exploit', 'malware', 'phishing', 'ransomware', 'encryption', 'encrypt', 'firewall',
+    'pentest', 'cve', 'threat', 'attack', 'hash', 'hashing', 'tls', 'ssl', 'auth',
+    'authentication', 'sanitize', 'incident', 'breach', 'bcrypt', 'argon2', 'scrypt'],
+  design: ['design', 'ui', 'ux', 'color', 'colour', 'palette', 'font', 'typography',
+    'typeface', 'layout', 'logo', 'figma', 'branding', 'icon', 'contrast', 'grid',
+    'spacing', 'responsive', 'wireframe', 'mockup', 'accessibility'],
+  data: ['data', 'dataset', 'csv', 'spreadsheet', 'excel', 'statistics', 'stats', 'average',
+    'mean', 'median', 'chart', 'graph', 'plot', 'visualization', 'visualisation',
+    'analytics', 'regression', 'correlation', 'outlier'],
+};
+
+const TEXT_COMMAND = /^(reverse|upper|lower|echo|count)\s+/i;
+const MATH_COMMAND = /^(?:calc|calculate|math|=)\s*/i;
+const GENERAL_RULE = /^(hi|hello|hey|yo|hiya|good (morning|afternoon|evening)|help|commands|\?|what can you do)\b|\b(what.*time|current time|what.*date|today.*date|thanks|thank you|thx)\b|^(time|date)$/;
+
+/** Return the content category for a message (one of policy.CATEGORY_NAMES). */
+function classify(message) {
+  const raw = String(message || '').trim();
+  const norm = normalize(raw);
+  if (MATH_COMMAND.test(raw)) return 'math';
+  if (TEXT_COMMAND.test(raw)) return 'text';
+  if (GENERAL_RULE.test(norm)) return 'general';
+  if (faqMatch(norm, FAQ)) return 'general'; // questions about this service
+  const words = new Set(norm.match(/[a-z0-9]+/g) || []);
+  let best = 'general';
+  let bestHits = 0;
+  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
+    const hits = kws.filter((k) => words.has(k)).length;
+    if (hits > bestHits) {
+      best = cat;
+      bestHits = hits;
+    }
+  }
+  return best;
+}
+
 /** Try the local FAQ by keyword overlap; returns {answer, score} best match. */
-function faqMatch(norm) {
+function faqMatch(norm, entries = FAQ) {
   // Tokenize on word chars so trailing punctuation ("stolen?") still matches.
   const words = new Set(norm.match(/[a-z0-9]+/g) || []);
   let best = null;
-  for (const item of FAQ) {
+  for (const item of entries) {
     const hits = item.keywords.filter((k) => words.has(k)).length;
     if (hits >= 2 && (!best || hits > best.score)) best = { answer: item.answer, score: hits };
   }
@@ -218,7 +295,7 @@ async function generate(message, opts = {}) {
   }
 
   // 3. local FAQ retrieval
-  const faq = faqMatch(norm);
+  const faq = faqMatch(norm, FAQ) || faqMatch(norm, CATEGORY_KB);
   if (faq) {
     cacheSet(norm, { reply: faq.answer, source: 'faq' });
     return { reply: faq.answer, source: 'faq' };
@@ -243,4 +320,4 @@ async function generate(message, opts = {}) {
   return { reply, source: 'fallback' };
 }
 
-module.exports = { generate, safeCalc, _cache: cache };
+module.exports = { generate, classify, safeCalc, _cache: cache };

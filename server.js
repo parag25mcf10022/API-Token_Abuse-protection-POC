@@ -24,6 +24,10 @@ const db = require('./db');
 const engine = require('./engine');
 const security = require('./security');
 const { createLimiter, limit, tooMany } = require('./rateLimit');
+const usage = require('./usage');
+const alerts = require('./alerts');
+const policyLib = require('./policy');
+const { createAdminRouter } = require('./adminRoutes');
 
 // Optional LLM fallback for messages the local engine can't confidently
 // answer. Disabled unless you wire one up (kept null here so the demo makes
@@ -40,7 +44,9 @@ const SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
 
 async function main() {
   // Connect to MongoDB ("AAP") before wiring up anything that needs it.
-  await db.connect();
+  const mongo = await db.connect();
+  await usage.init(mongo);
+  await alerts.init(mongo);
 
   const app = express();
   app.disable('x-powered-by');
@@ -163,13 +169,6 @@ async function main() {
     next();
   }
 
-  const requireAdmin = wrap(async (req, res, next) => {
-    const user = req.session && (await db.getUserById(req.session.userId));
-    if (!user || !user.isAdmin) {
-      return res.status(403).json({ error: 'Admin access required' });
-    }
-    next();
-  });
 
   // --- Rate limits ---------------------------------------------------------
   const MIN = 60 * 1000;
@@ -182,8 +181,8 @@ async function main() {
     // CLI polls every 2 s (30/min); leave headroom.
     statusIp: createLimiter({ windowMs: MIN, max: 60 }),
     messageIp: createLimiter({ windowMs: MIN, max: 120 }),
-    // Per account, so a stolen key can't be hammered from many IPs.
-    messageUser: createLimiter({ windowMs: MIN, max: 60 }),
+    // Per-account limits are admin-configurable policies (see usage.js).
+    masterIp: createLimiter({ windowMs: MIN, max: 60 }),
   };
   const byIp = (req) => req.ip;
 
@@ -224,7 +223,12 @@ async function main() {
     const device = await db.getDevice(user.id, token);
     if (!device) {
       const n = security.cleanText(req.get('X-AAP-Device-Name') || '', 'name', 64);
-      await db.registerPendingDevice(user.id, token, n.ok ? n.value.trim() : 'unnamed device');
+      const name = n.ok ? n.value.trim() : 'unnamed device';
+      const d = await db.registerPendingDevice(user.id, token, name);
+      await alerts.raise('new_device', user, {
+        detail: `Key used from a new device "${name}" (code ${d.code}).`,
+        ip: req.ip,
+      });
       return false;
     }
     if (device.status !== 'approved') return false;
@@ -281,9 +285,20 @@ async function main() {
     const passwordOk = db.verifyPassword(password, user ? user.passwordHash : db.DUMMY_HASH);
     if (!user || !passwordOk) {
       limits.loginFail.hit(failKey);
+      // Alert once, on the failure that triggers the lockout.
+      if (user && limits.loginFail.blocked(failKey).blocked) {
+        await alerts.raise('login_lockout', user, {
+          detail: 'Too many failed login attempts; logins from this IP locked for 15 min.',
+          ip: req.ip,
+          daily: true,
+        });
+      }
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
     limits.loginFail.reset(failKey);
+    if (await db.noteLoginIp(user.id, req.ip)) {
+      await alerts.raise('new_ip_login', user, { detail: 'Login from a new IP address.', ip: req.ip });
+    }
     await startSession(req, user.id);
     res.json({ email: user.email, isAdmin: user.isAdmin });
   }));
@@ -302,9 +317,14 @@ async function main() {
   app.post('/auth/logout-all', requireLogin, wrap(async (req, res) => {
     const { deletedCount } = await sessionsCol.deleteMany({
       'session.userId': req.session.userId,
+      _id: { $ne: req.sessionID },
     });
-    res.clearCookie('aap.sid');
-    res.json({ ok: true, sessionsEnded: deletedCount });
+    // Destroy the current one through express-session, so it doesn't try to
+    // refresh (touch) a session that no longer exists after responding.
+    req.session.destroy(() => {
+      res.clearCookie('aap.sid');
+      res.json({ ok: true, sessionsEnded: deletedCount + 1 });
+    });
   }));
 
   // --- Device management (owner only, scoped to the session's user) -------
@@ -331,12 +351,19 @@ async function main() {
   app.get('/auth/me', requireLogin, wrap(async (req, res) => {
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
+    const org = await db.getOrg(user.orgId);
     res.json({
       email: user.email,
       apiKeyPrefix: user.apiKeyPrefix, // full key is never shown again
       keyEnabled: user.keyEnabled,
+      keyRevoked: !!user.keyRevoked, // admin revoked it → owner must generate a new one
       isAdmin: user.isAdmin,
       activeSessions: await countActiveSessions(user.id),
+      // Read-only view of what admins configured for this key.
+      org: org ? { id: org.id, name: org.name, role: user.orgRole, masterKeyPrefix: user.orgRole === 'admin' ? org.masterKeyPrefix : undefined } : null,
+      scopes: policyLib.allowedScopes(user.policy, org && org.policy),
+      limits: (user.policy && user.policy.limits) || {},
+      usage: await usage.summary(`u:${user.id}`),
     });
   }));
 
@@ -427,10 +454,6 @@ async function main() {
       });
     }
 
-    // Per-account quota, regardless of which IP the key is used from.
-    const quota = limits.messageUser.hit(user.id);
-    if (!quota.allowed) return tooMany(res, quota.retryAfterSec);
-
     // 3. THE AAP CHECK — is the owner's browser session active right now?
     const active = await userHasActiveSession(user.id);
     if (!active) {
@@ -439,13 +462,43 @@ async function main() {
         .json({ error: 'Unauthorized: No active session found' });
     }
 
-    // 4. Session is live → run the lightweight response engine.
+    // 4. Scope: is this key allowed to use this content category?
+    const org = await db.getOrg(user.orgId);
+    const category = engine.classify(msg.value);
+    if (!policyLib.allowedScopes(user.policy, org && org.policy).includes(category)) {
+      return res.status(403).json({
+        error: `Forbidden: your key is not allowed to use the "${category}" category.`,
+        category,
+      });
+    }
+
+    // 5. Usage limits (user + org pool), configured by admins only.
+    const est = policyLib.estimateTokens(msg.value);
+    const quota = await usage.check(user, org, category, est);
+    if (!quota.ok) {
+      await alerts.raise('limit_exceeded', user, {
+        detail: `${quota.level} limit ${quota.limit} (${quota.max}) reached.`,
+        daily: true,
+      });
+      res.set('Retry-After', String(quota.retryAfterSec));
+      return res.status(429).json({
+        error: `Usage limit reached: ${quota.limit} (${quota.max}) for your ${quota.level === 'org' ? 'organization' : 'account'}.`,
+        limit: quota.limit,
+        retryAfter: quota.retryAfterSec,
+      });
+    }
+
+    // 6. All checks passed → run the engine and meter the usage.
     const { reply, source } = await engine.generate(msg.value, {
       llmFallback: llmFallback || undefined,
     });
+    const tokens = policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(reply);
+    await usage.record(user, org, category, tokens);
     res.json({
       reply,
       source, // "rule" | "faq" | "cache" | "llm" | "fallback" — handy for the demo
+      category,
+      tokens,
       processedAt: new Date().toISOString(),
     });
   }));
@@ -454,32 +507,68 @@ async function main() {
   // ADMIN PANEL (bonus)
   // =======================================================================
 
-  app.get('/api/admin/users', requireLogin, requireAdmin, wrap(async (req, res) => {
-    const out = [];
-    for (const u of await db.listUsers()) {
-      out.push({
-        id: u.id,
-        email: u.email,
-        apiKeyPrefix: u.apiKeyPrefix, // admins never see full keys
-        keyEnabled: u.keyEnabled,
-        isAdmin: u.isAdmin,
-        hasActiveSession: await userHasActiveSession(u.id),
-      });
-    }
-    res.json({ users: out });
-  }));
+  const admin = createAdminRouter({
+    db, usage, alerts, security, wrap, sessionsCol, countActiveSessions,
+  });
 
-  app.post('/api/admin/toggle-key', requireLogin, requireAdmin, wrap(async (req, res) => {
-    const { userId, enabled } = req.body || {};
-    if (!Number.isInteger(userId) || typeof enabled !== 'boolean') {
-      return res.status(400).json({ error: 'userId (integer) and enabled (boolean) are required.' });
+  // Session-authenticated admins: super admin, or an org admin (own org only).
+  const sessionActor = wrap(async (req, res, next) => {
+    const user = req.session && req.session.userId && (await db.getUserById(req.session.userId));
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (user.isAdmin) req.actor = { kind: 'super', userId: user.id, via: 'session' };
+    else if (user.orgId && user.orgRole === 'admin') {
+      req.actor = { kind: 'org', orgId: user.orgId, userId: user.id, via: 'session' };
+    } else return res.status(403).json({ error: 'Admin access required' });
+    next();
+  });
+
+  // Master-key-authenticated org management. The master key alone is never
+  // enough: the request must come from an APPROVED device of one of the org's
+  // admins, and that admin must have a live browser session.
+  const masterActor = wrap(async (req, res, next) => {
+    const key = req.get('X-AAP-Master-Key');
+    const token = req.get('X-AAP-Device');
+    if (!security.isMasterKey(key)) return res.status(401).json({ error: 'Valid X-AAP-Master-Key header required.' });
+    if (typeof token !== 'string' || !/^[0-9a-f]{64}$/.test(token)) {
+      return res.status(400).json({ error: 'X-AAP-Device header required (64 hex chars).' });
     }
-    try {
-      const state = await db.setKeyEnabled(userId, enabled);
-      res.json({ userId, keyEnabled: state });
-    } catch (e) {
-      res.status(404).json({ error: e.message });
+    const org = await db.getOrgByMasterKey(key);
+    if (!org) return res.status(401).json({ error: 'Unauthorized: invalid master key' });
+    for (const u of await db.listUsersInOrg(org.id)) {
+      if (u.orgRole !== 'admin') continue;
+      const device = await db.getDevice(u.id, token);
+      if (!device || device.status !== 'approved') continue;
+      if (!(await userHasActiveSession(u.id))) {
+        return res.status(401).json({ error: 'Unauthorized: org admin has no active session' });
+      }
+      await db.touchDevice(device._id);
+      req.actor = { kind: 'org', orgId: org.id, userId: u.id, via: 'master' };
+      return next();
     }
+    res.status(403).json({ error: "Forbidden: master key may only be used from an org admin's approved device." });
+  });
+
+  app.use('/api/admin', sessionActor, admin.router);
+  app.use('/api/org', limit(limits.masterIp, byIp), masterActor, admin.router);
+
+  // Org admins issue/rotate their org's master key from the web UI (password
+  // required). It's shown once; only its hash is stored. Not available via the
+  // master key itself, and not to super admins — it belongs to the org admin.
+  app.post('/auth/org/master-key', requireLogin, wrap(async (req, res) => {
+    const user = await db.getUserById(req.session.userId);
+    if (!user || !user.orgId || user.orgRole !== 'admin') {
+      return res.status(403).json({ error: 'Org admins only.' });
+    }
+    const failKey = `rotate|${user.id}`;
+    const lock = limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const { password } = req.body || {};
+    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+      limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    limits.loginFail.reset(failKey);
+    res.json({ masterKey: await db.rotateOrgMasterKey(user.orgId) });
   }));
 
   // --- Static frontend ----------------------------------------------------
@@ -490,6 +579,7 @@ async function main() {
   // client always gets a response instead of a hung request.
   // eslint-disable-next-line no-unused-vars
   app.use((err, req, res, next) => {
+    if (res.headersSent) return next(err); // too late to send an error body
     if (err.type === 'entity.parse.failed') {
       return res.status(400).json({ error: 'Malformed JSON body.' });
     }

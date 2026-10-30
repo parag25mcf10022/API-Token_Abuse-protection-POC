@@ -12,6 +12,7 @@
 
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
+const { DEFAULT_USER_POLICY } = require('./policy');
 
 const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017';
 const DB_NAME = process.env.MONGO_DB || 'AAP';
@@ -21,6 +22,7 @@ let db;
 let users;
 let counters;
 let devices;
+let orgs;
 
 /** Connect once and cache the handles. Safe to call repeatedly. */
 async function connect() {
@@ -31,13 +33,34 @@ async function connect() {
   users = db.collection('users');
   counters = db.collection('counters');
   devices = db.collection('devices');
+  orgs = db.collection('orgs');
   await users.createIndex({ email: 1 }, { unique: true });
   await users.createIndex({ id: 1 }, { unique: true });
   await migratePlaintextKeys();
   await users.createIndex({ apiKeyHash: 1 }, { unique: true });
   await devices.createIndex({ userId: 1, deviceHash: 1 }, { unique: true });
   await devices.createIndex({ publicId: 1 }, { unique: true });
+  await orgs.createIndex({ id: 1 }, { unique: true });
+  await orgs.createIndex({ name: 1 }, { unique: true });
+  await orgs.createIndex(
+    { masterKeyHash: 1 },
+    { unique: true, partialFilterExpression: { masterKeyHash: { $type: 'string' } } }
+  );
+  await users.createIndex({ orgId: 1 });
+  await migrateMissingPolicies();
   return db;
+}
+
+/** Users created before policies existed: admins unrestricted, others default. */
+async function migrateMissingPolicies() {
+  await users.updateMany(
+    { policy: { $exists: false }, isAdmin: true },
+    { $set: { policy: { scopes: null, limits: { categoryRequestsPerDay: {} } } } }
+  );
+  await users.updateMany(
+    { policy: { $exists: false } },
+    { $set: { policy: DEFAULT_USER_POLICY } }
+  );
 }
 
 /**
@@ -129,10 +152,10 @@ function keyPrefix(apiKey) {
   return apiKey.slice(0, 10);
 }
 
-/** Atomically grab the next numeric user id. */
-async function nextId() {
+/** Atomically grab the next numeric id for a sequence ("userId", "orgId"). */
+async function nextId(seq = 'userId') {
   const doc = await counters.findOneAndUpdate(
-    { _id: 'userId' },
+    { _id: seq },
     { $inc: { seq: 1 } },
     { upsert: true, returnDocument: 'after' }
   );
@@ -140,7 +163,11 @@ async function nextId() {
 }
 
 // New keys start DISABLED: an admin must approve (enable) them before use.
-async function createUser(email, password, { isAdmin = false, keyEnabled = false } = {}) {
+async function createUser(
+  email,
+  password,
+  { isAdmin = false, keyEnabled = false, orgId = null, orgRole = null, policy = null } = {}
+) {
   email = email.trim().toLowerCase();
   // Deliberately vague: don't confirm whether an email is registered.
   if (await users.findOne({ email })) {
@@ -155,7 +182,12 @@ async function createUser(email, password, { isAdmin = false, keyEnabled = false
     apiKeyHash: hashApiKey(apiKey),
     apiKeyPrefix: keyPrefix(apiKey),
     keyEnabled: !!keyEnabled, // admin toggles this on/off
+    keyRevoked: false,
     isAdmin,
+    orgId,
+    orgRole, // 'admin' | 'member' | null
+    policy: policy || DEFAULT_USER_POLICY,
+    knownIps: [],
     createdAt: new Date().toISOString(),
   };
   try {
@@ -191,7 +223,13 @@ async function rotateApiKey(userId) {
   const apiKey = generateApiKey();
   const r = await users.updateOne(
     { id: Number(userId) },
-    { $set: { apiKeyHash: hashApiKey(apiKey), apiKeyPrefix: keyPrefix(apiKey) } }
+    {
+      $set: {
+        apiKeyHash: hashApiKey(apiKey),
+        apiKeyPrefix: keyPrefix(apiKey),
+        keyRevoked: false,
+      },
+    }
   );
   if (!r.matchedCount) throw new Error('User not found');
   return apiKey;
@@ -290,6 +328,104 @@ async function removeDevice(userId, publicId) {
   return r.deletedCount === 1;
 }
 
+/**
+ * Admin response to suspicious activity: kill the key without issuing a new
+ * one. The owner must log in and generate a replacement (shown only to them).
+ */
+async function revokeApiKey(userId) {
+  const r = await users.updateOne(
+    { id: Number(userId) },
+    {
+      $set: {
+        // Unique, never-matching placeholder (hex keys can't hash to this).
+        apiKeyHash: `revoked:${crypto.randomBytes(16).toString('hex')}`,
+        apiKeyPrefix: null,
+        keyRevoked: true,
+      },
+    }
+  );
+  return r.matchedCount === 1;
+}
+
+/**
+ * Remember the IPs an account logs in from. Returns true if this IP is new
+ * AND the account has logged in before (first login isn't suspicious).
+ */
+async function noteLoginIp(userId, ip) {
+  const u = await users.findOne({ id: Number(userId) }, { projection: { knownIps: 1 } });
+  const known = (u && u.knownIps) || [];
+  if (known.includes(ip)) return false;
+  await users.updateOne(
+    { id: Number(userId) },
+    { $push: { knownIps: { $each: [ip], $slice: -20 } } }
+  );
+  return known.length > 0;
+}
+
+function setUserPolicy(userId, policy) {
+  return users.updateOne({ id: Number(userId) }, { $set: { policy } });
+}
+
+function setUserOrg(userId, orgId, orgRole) {
+  return users.updateOne({ id: Number(userId) }, { $set: { orgId, orgRole } });
+}
+
+function listUsersInOrg(orgId) {
+  return users.find({ orgId }).sort({ id: 1 }).toArray();
+}
+
+// --- Orgs ------------------------------------------------------------------
+// An org groups members under one admin-only master key. The master key is
+// for management only (see server.js /api/org/*) and is stored hashed.
+
+async function createOrg(name) {
+  const org = {
+    id: await nextId('orgId'),
+    name,
+    masterKeyHash: null,
+    masterKeyPrefix: null,
+    // Org-wide pool: totals across all members. Empty = unlimited.
+    policy: { scopes: null, limits: { categoryRequestsPerDay: {} } },
+    // Policy given to newly added members.
+    memberDefaults: DEFAULT_USER_POLICY,
+    createdAt: new Date().toISOString(),
+  };
+  try {
+    await orgs.insertOne(org);
+  } catch (e) {
+    if (e.code === 11000) throw new Error('An org with that name already exists.');
+    throw e;
+  }
+  return org;
+}
+
+function getOrg(id) {
+  return id == null ? null : orgs.findOne({ id: Number(id) });
+}
+
+function listOrgs() {
+  return orgs.find().sort({ id: 1 }).toArray();
+}
+
+function getOrgByMasterKey(masterKey) {
+  return orgs.findOne({ masterKeyHash: hashApiKey(masterKey) });
+}
+
+/** Issue a new master key (old one dies). Returns the plaintext, once. */
+async function rotateOrgMasterKey(orgId) {
+  const key = 'mk_' + crypto.randomBytes(24).toString('hex');
+  const r = await orgs.updateOne(
+    { id: Number(orgId) },
+    { $set: { masterKeyHash: hashApiKey(key), masterKeyPrefix: key.slice(0, 10) } }
+  );
+  if (!r.matchedCount) throw new Error('Org not found');
+  return key;
+}
+
+function setOrgPolicy(orgId, field, policy) {
+  return orgs.updateOne({ id: Number(orgId) }, { $set: { [field]: policy } });
+}
+
 /** Admin helper: flip a user's API key on/off. Returns the new state. */
 async function setKeyEnabled(userId, enabled) {
   const doc = await users.findOneAndUpdate(
@@ -323,4 +459,15 @@ module.exports = {
   verifyPassword,
   DUMMY_HASH,
   rotateApiKey,
+  revokeApiKey,
+  noteLoginIp,
+  setUserPolicy,
+  setUserOrg,
+  listUsersInOrg,
+  createOrg,
+  getOrg,
+  listOrgs,
+  getOrgByMasterKey,
+  rotateOrgMasterKey,
+  setOrgPolicy,
 };
