@@ -338,18 +338,26 @@ def waiting_text(reason, base):
     code = device_code(DEVICE_TOKEN)
     return {
         "device_not_approved": f"approve device {code} on your dashboard ({base})",
+        "device_approved_for_other_account": (
+            f"device {code} is approved for a different account — approve it on the dashboard "
+            "of the account that owns THIS key"
+        ),
         "no_session": f"log in to the web app at {base}",
         "key_disabled": "an admin must enable your key",
         "key_locked_needs_approval": "key locked — waiting for your org admin to approve regeneration",
     }.get(reason, f"waiting for the server ({base})")
 
 
-def recover_locked_key(client):
-    """The key was auto-locked: guide the owner to a new key, then use it."""
+def recover_locked_key(client, invalid=False):
+    """The key is locked (or no longer valid): guide the owner to a new key, then use it."""
     print()
-    print(f"  {BAD} {bold('Your key was locked automatically')} after suspected compromise or abuse.")
-    print(f"      {INFO} Log in at {ACCENT(client.base)} and click {bold('Generate new key')} (your password).")
-    print(f"      {INFO} Or ask an admin to unlock it if this was a false alarm.")
+    if invalid:
+        print(f"  {BAD} {bold('This API key is not valid')} — it was probably regenerated or revoked.")
+        print(f"      {INFO} Log in at {ACCENT(client.base)} and use {bold('Show key')} or {bold('Generate new key')}.")
+    else:
+        print(f"  {BAD} {bold('Your key was locked automatically')} after suspected compromise or abuse.")
+        print(f"      {INFO} Log in at {ACCENT(client.base)} and click {bold('Generate new key')} (your password).")
+        print(f"      {INFO} Or ask an admin to unlock it if this was a false alarm.")
     if not sys.stdin.isatty():
         return False
     try:
@@ -379,8 +387,8 @@ def wait_for_session(client, quiet=False):
     shown = None
     try:
         while not active:
-            if reason == "key_locked":
-                if not recover_locked_key(client):
+            if reason in ("key_locked", "invalid_key"):
+                if not recover_locked_key(client, invalid=reason == "invalid_key"):
                     return False
                 active, _, reason = client.session_active()
                 continue
@@ -452,10 +460,16 @@ def cmd_usage(client):
         ("tokens month   ", u["month"]["tokens"], lim.get("tokensPerMonth")),
     ):
         print(f"  {dim(label)} {meter(used, cap)}")
-    by_cat = u["today"]["byCategory"]
-    if by_cat:
-        cats = ", ".join(f"{safe(k)} {v}" for k, v in sorted(by_cat.items(), key=lambda x: -x[1]))
-        print(f"  {dim('by category    ')} {cats}")
+    cats = d.get("categories") or []
+    if cats:
+        print()
+        print(f"  {bold('Category'.ljust(9))} {bold('Quota/day'.ljust(13))} {bold('Used'.ljust(6))} {bold('Status')}")
+        for c in cats:
+            quota = "—" if not c["inPlan"] else ("shared" if c["cap"] is None else f"{c['cap']:,}")
+            status = green("available") if c["usable"] else (dim if not c["inPlan"] else amber)(
+                safe(c["status"]).replace("_", " "))
+            name = safe(c["category"]).ljust(9)
+            print(f"  {name if c['inPlan'] else dim(name)} {quota.ljust(13)} {str(c['used']).ljust(6)} {status}")
 
 
 def cmd_model(client):
@@ -530,6 +544,10 @@ def ask(client, message, history, stream=True):
     if meta.get("truncated"):
         parts.append(amber("truncated — ask me to continue"))
     print(dim("  ↳ " + " · ".join(parts)))
+    # Quota warnings (50/75/90/99%) triggered by this request.
+    for n in meta.get("notices") or []:
+        mark = red("●") if n.get("level") == "critical" else amber("●") if n.get("level") == "warn" else teal("●")
+        print(f"  {mark} {safe(n.get('text', ''))}")
     return reply, True, 200
 
 

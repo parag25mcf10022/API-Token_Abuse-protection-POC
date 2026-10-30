@@ -119,6 +119,61 @@ function allowedScopes(userPolicy, orgPolicy) {
   return allowed;
 }
 
+/**
+ * Per-category view for the owner: is each category usable right now, and if
+ * not, why? Catches the "allowed but can't use" cases — blocked by the org,
+ * a cap of 0, a per-category cap reached, or an overall quota exhausted.
+ *
+ * @param {object} p  { userPolicy, orgPolicy, userUsage, orgUsage } where
+ *                    usage is usage.summary() output ({today, month}).
+ */
+function categoryStatus({ userPolicy, orgPolicy, userUsage, orgUsage }) {
+  const ul = (userPolicy && userPolicy.limits) || {};
+  const ol = (orgPolicy && orgPolicy.limits) || {};
+  const inScope = (p, cat) => !p || !Array.isArray(p.scopes) || p.scopes.includes(cat);
+  const reached = (used, cap) => Number.isInteger(cap) && used >= cap;
+  const ut = userUsage.today, um = userUsage.month;
+  const ot = orgUsage ? orgUsage.today : null, om = orgUsage ? orgUsage.month : null;
+
+  // Overall quotas that block every category at once.
+  let overall = null;
+  if (reached(ut.requests, ul.requestsPerDay)) overall = 'daily_requests_used_up';
+  else if (reached(um.requests, ul.requestsPerMonth)) overall = 'monthly_requests_used_up';
+  else if (reached(ut.tokens, ul.tokensPerDay)) overall = 'daily_tokens_used_up';
+  else if (reached(um.tokens, ul.tokensPerMonth)) overall = 'monthly_tokens_used_up';
+  else if (ot && reached(ot.requests, ol.requestsPerDay)) overall = 'org_daily_pool_used_up';
+  else if (om && reached(om.requests, ol.requestsPerMonth)) overall = 'org_monthly_pool_used_up';
+  else if (ot && reached(ot.tokens, ol.tokensPerDay)) overall = 'org_daily_tokens_used_up';
+
+  return CATEGORY_NAMES.map((cat) => {
+    const userCap = (ul.categoryRequestsPerDay || {})[cat];
+    const orgCap = (ol.categoryRequestsPerDay || {})[cat];
+    const caps = [userCap, orgCap].filter(Number.isInteger);
+    const cap = caps.length ? Math.min(...caps) : null;
+    const used = (ut.byCategory || {})[cat] || 0;
+    const orgUsed = ot ? (ot.byCategory || {})[cat] || 0 : 0;
+
+    let status = 'ok';
+    if (!inScope(userPolicy, cat)) status = 'not_in_plan';
+    else if (!inScope(orgPolicy, cat)) status = 'blocked_by_org';
+    else if (cap === 0) status = 'cap_is_zero';
+    else if (reached(used, userCap)) status = 'cap_reached';
+    else if (reached(orgUsed, orgCap)) status = 'org_cap_reached';
+    else if (overall) status = overall;
+
+    return {
+      category: cat,
+      description: CATEGORIES[cat],
+      inPlan: status !== 'not_in_plan' && status !== 'blocked_by_org',
+      usable: status === 'ok',
+      status,
+      cap, // per-category daily cap (null = shares the overall daily quota)
+      used,
+      remaining: cap === null ? null : Math.max(0, cap - used),
+    };
+  });
+}
+
 /** LLM access needs both the user and org policy to allow it (null = inherit/allow). */
 function llmAllowed(userPolicy, orgPolicy) {
   return [userPolicy, orgPolicy].every((p) => !p || p.llm !== false);
@@ -126,6 +181,7 @@ function llmAllowed(userPolicy, orgPolicy) {
 
 module.exports = {
   llmAllowed,
+  categoryStatus,
   CATEGORIES,
   CATEGORY_NAMES,
   LIMIT_FIELDS,

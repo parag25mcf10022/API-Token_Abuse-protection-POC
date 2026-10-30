@@ -114,6 +114,20 @@ const FAQ = [
 // change over time and must not be cached, or null (not my job). Order
 // matters: specific commands first, fuzzy/FAQ matching last.
 const RULES = [
+  // natural arithmetic: "15% of 80", "what is 12 * 7", "how much is (3+4)*2?"
+  (raw) => {
+    const pct = raw.match(/(\d+(?:\.\d+)?)\s*%\s*of\s*(\d+(?:\.\d+)?)/i);
+    if (pct) {
+      const r = (Number(pct[1]) / 100) * Number(pct[2]);
+      return `${pct[1]}% of ${pct[2]} = ${Number(r.toFixed(10))}`;
+    }
+    const m = raw.match(/^(?:what(?:'s|s| is)|compute|calculate|evaluate|how much is)\s+([\d\s.+\-*\/()×÷]+?)\s*\??$/i);
+    if (!m || !/\d\s*[-+*\/×÷]\s*\(?\d/.test(m[1])) return null;
+    const expr = m[1].replace(/×/g, '*').replace(/÷/g, '/').trim();
+    if (/\/\s*0(?:\.0*)?(?:\D|$)/.test(expr)) return 'Cannot divide by zero.';
+    const r = safeCalc(expr);
+    return r === null ? null : `${expr} = ${r}`;
+  },
   // explicit commands: "calc 2+3*4"
   (raw) => {
     const m = raw.match(/^(?:calc|calculate|math|=)\s*(.+)$/i);
@@ -214,45 +228,89 @@ const CATEGORY_KB = [
 // Decides which content category (scope) a message belongs to, BEFORE it is
 // processed, so the API can enforce per-key scopes and per-category limits.
 const CATEGORY_KEYWORDS = {
-  coding: ['code', 'coding', 'program', 'programming', 'function', 'bug', 'debug', 'error',
-    'exception', 'stack', 'compile', 'javascript', 'typescript', 'python', 'java', 'golang',
+  coding: ['code', 'coding', 'program', 'programming', 'function', 'functions', 'bug', 'debug',
+    'error', 'exception', 'stack', 'compile', 'javascript', 'typescript', 'python', 'java', 'golang',
     'rust', 'node', 'regex', 'api', 'endpoint', 'json', 'git', 'sql', 'class', 'variable',
-    'algorithm', 'refactor', 'library', 'framework'],
+    'algorithm', 'refactor', 'library', 'framework', 'css', 'html', 'div', 'react', 'recursion',
+    'loop', 'array', 'script', 'bash', 'docker', 'npm', 'php', 'kotlin', 'swift', 'c++', 'compiler'],
   cyber: ['security', 'secure', 'vulnerability', 'vulnerabilities', 'xss', 'csrf', 'injection',
     'exploit', 'malware', 'phishing', 'ransomware', 'encryption', 'encrypt', 'firewall',
     'pentest', 'cve', 'threat', 'attack', 'hash', 'hashing', 'tls', 'ssl', 'auth',
-    'authentication', 'sanitize', 'incident', 'breach', 'bcrypt', 'argon2', 'scrypt'],
-  design: ['design', 'ui', 'ux', 'color', 'colour', 'palette', 'font', 'typography',
+    'authentication', 'sanitize', 'incident', 'breach', 'bcrypt', 'argon2', 'scrypt', 'trust',
+    'mfa', '2fa', 'vpn', 'ddos', 'owasp'],
+  design: ['design', 'ui', 'ux', 'color', 'colour', 'palette', 'font', 'fonts', 'typography',
     'typeface', 'layout', 'logo', 'figma', 'branding', 'icon', 'contrast', 'grid',
-    'spacing', 'responsive', 'wireframe', 'mockup', 'accessibility'],
+    'spacing', 'responsive', 'wireframe', 'mockup', 'accessibility', 'portfolio'],
   data: ['data', 'dataset', 'csv', 'spreadsheet', 'excel', 'statistics', 'stats', 'average',
-    'mean', 'median', 'chart', 'graph', 'plot', 'visualization', 'visualisation',
-    'analytics', 'regression', 'correlation', 'outlier'],
+    'mean', 'median', 'mode', 'chart', 'graph', 'plot', 'visualization', 'visualisation',
+    'analytics', 'regression', 'correlation', 'outlier', 'deviation', 'variance', 'percentile',
+    'distribution', 'pandas'],
+  math: ['math', 'maths', 'mathematics', 'solve', 'equation', 'equations', 'calculate',
+    'calculation', 'percent', 'percentage', 'sum', 'multiply', 'divide', 'divided', 'plus',
+    'minus', 'times', 'sqrt', 'root', 'square', 'integral', 'derivative', 'algebra', 'geometry',
+    'area', 'volume', 'fraction', 'fractions', 'radius', 'perimeter', 'factorial', 'prime'],
+  text: ['summarize', 'summarise', 'summary', 'rewrite', 'paraphrase', 'rephrase', 'grammar',
+    'proofread', 'translate', 'translation', 'spelling', 'essay', 'sentence', 'paragraph',
+    'tone', 'formally', 'shorten', 'wording', 'letter', 'email', 'headline', 'caption'],
 };
+
+// Ties go to the more specific category ("prevent sql injection" → cyber).
+const CATEGORY_PRIORITY = ['cyber', 'design', 'data', 'math', 'text', 'coding'];
+
+// Arithmetic written inline: "12 * 7", "2x + 5 = 11", "15% of 80".
+const MATH_EXPR = /\d\s*[-+*\/^×÷=]\s*\(?\d|\d+(\.\d+)?\s*%\s*of\s*\d/;
 
 const TEXT_COMMAND = /^(reverse|upper|lower|echo|count)\s+/i;
 const MATH_COMMAND = /^(?:calc|calculate|math|=)\s*/i;
 const GENERAL_RULE = /^(hi|hello|hey|yo|hiya|good (morning|afternoon|evening)|help|commands|\?|what can you do)\b|\b(what.*time|current time|what.*date|today.*date|thanks|thank you|thx)\b|^(time|date)$/;
 
-/** Return the content category for a message (one of policy.CATEGORY_NAMES). */
-function classify(message) {
+/** Category of a single message, plus whether it had real evidence. */
+function classifyOne(message) {
   const raw = String(message || '').trim();
   const norm = normalize(raw);
-  if (MATH_COMMAND.test(raw)) return 'math';
-  if (TEXT_COMMAND.test(raw)) return 'text';
-  if (GENERAL_RULE.test(norm)) return 'general';
-  if (faqMatch(norm, FAQ)) return 'general'; // questions about this service
-  const words = new Set(norm.match(/[a-z0-9]+/g) || []);
+  if (MATH_COMMAND.test(raw)) return { cat: 'math', evidence: true };
+  if (TEXT_COMMAND.test(raw)) return { cat: 'text', evidence: true };
+  if (GENERAL_RULE.test(norm)) return { cat: 'general', evidence: true };
+  if (faqMatch(norm, FAQ)) return { cat: 'general', evidence: true }; // questions about this service
+  const words = new Set(norm.match(/[a-z0-9+]+/g) || []);
+  const hits = Object.fromEntries(
+    Object.entries(CATEGORY_KEYWORDS).map(([cat, kws]) => [cat, kws.filter((k) => words.has(k)).length])
+  );
+  if (MATH_EXPR.test(raw)) hits.math += 2; // an inline expression is strong evidence
   let best = 'general';
   let bestHits = 0;
-  for (const [cat, kws] of Object.entries(CATEGORY_KEYWORDS)) {
-    const hits = kws.filter((k) => words.has(k)).length;
-    if (hits > bestHits) {
+  for (const cat of CATEGORY_PRIORITY) {
+    if (hits[cat] > bestHits) {
       best = cat;
-      bestHits = hits;
+      bestHits = hits[cat];
     }
   }
-  return best;
+  return { cat: best, evidence: bestHits > 0 };
+}
+
+// A short message that points back at the conversation ("explain it more",
+// "what about the second one?", "again but shorter").
+const FOLLOW_UP = /^(and|also|now|then|so|ok|okay|what about|how about|why|again)\b|\b(it|that|this|those|these|them|same|previous|above|again|more|shorter|simpler|longer)\b/;
+
+/**
+ * Return the content category for a message (one of policy.CATEGORY_NAMES).
+ * With conversation history, a short follow-up that has no category of its
+ * own inherits the category of the latest user turn that had one. History is
+ * client-supplied, so only genuine follow-ups inherit — "tell me a joke"
+ * stays "general" no matter what came before.
+ */
+function classify(message, history = []) {
+  const own = classifyOne(message);
+  if (own.evidence || !Array.isArray(history) || !history.length) return own.cat;
+  const norm = normalize(String(message || ''));
+  if (norm.length > 80 || !FOLLOW_UP.test(norm)) return own.cat;
+  for (let i = history.length - 1; i >= 0; i--) {
+    const turn = history[i];
+    if (!turn || turn.role !== 'user') continue;
+    const prev = classifyOne(turn.content);
+    if (prev.evidence && prev.cat !== 'general') return prev.cat;
+  }
+  return own.cat;
 }
 
 /** Try the local FAQ by keyword overlap; returns {answer, score} best match. */

@@ -4,6 +4,28 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Added (quotas, notifications, classification)
+- **Categories & quotas** on the dashboard and in CLI `/usage`: every
+  category's daily quota, usage, remaining allowance, and why it's
+  unavailable.
+- **Quota notifications at 50/75/90/99%** for daily/monthly requests and
+  tokens, per-category caps, and the org pool. They're stored per user,
+  dismissable, shown as a pop-up on the open dashboard and inline in the CLI.
+- **Classifier fixes:**
+  - natural maths (`what's 2+3?`, `15% of 80`), writing tasks, and more
+    coding/cyber/data terms;
+  - ties go to the more specific category;
+  - short follow-ups inherit the conversation's category (forged history
+    can't pull unrelated questions in).
+- The built-in engine computes natural arithmetic without an LLM.
+- Scope errors name the classified category and the allowed ones.
+- `session-status` reports `invalid_key` and
+  `device_approved_for_other_account`; the CLI explains both and accepts a
+  new key without restarting.
+- **README:** full step-by-step installation (prerequisites per OS,
+  `pip install -r requirements.txt` in a venv, MongoDB, optional models,
+  troubleshooting).
+
 ### Added (setup, routing, account safety)
 - **`npm run setup`:** guided, cross-platform setup.
   - Checks Node, Python, MongoDB, Ollama, RAM, GPU and free disk.

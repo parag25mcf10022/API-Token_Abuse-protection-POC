@@ -31,50 +31,114 @@ flowchart LR
     P -- yes --> E[Engine reply]
 ```
 
-## Quick start
+## Installation
+
+You need **Node.js 20.19+**, **MongoDB**, and **Python 3** for the terminal clients.
+An **Ollama** LLM is optional.
+
+### Option A: guided setup (recommended)
 
 ```bash
 git clone https://github.com/parag25mcf10022/API-Token_Abuse-protection-POC.git
 cd API-Token_Abuse-protection-POC
-npm run setup      # checks your machine, installs small deps, asks before big downloads
-npm start          # → http://localhost:3000
+npm run setup
 ```
 
-### Requirements
+`npm run setup` checks your machine (Node, Python, MongoDB, Ollama, RAM, GPU,
+free disk) and does the following:
 
-| Component | Needed for | Notes |
-|-----------|-----------|-------|
-| **Node.js 20.19+** | the server | required |
-| **MongoDB** | storage | required. Setup detects it; if Docker is available it can start `mongo:7` for you (~700 MB, asks first) |
-| **Python 3 + `requests`** | `client.py`, `org_client.py` | `pip install -r requirements.txt` (setup offers this) |
-| **Ollama** + models | LLM answers | **optional**: `llama3.2:3b` (~2 GB) for general answers, `qwen2.5-coder:7b` (~4.7 GB) for coding |
+- runs `npm install`;
+- offers to run `pip install -r requirements.txt`;
+- offers to start MongoDB in Docker if it isn't running (~700 MB image);
+- **asks before downloading any LLM model**, showing its size. Every prompt
+  defaults to *No*.
 
-`npm run setup` checks RAM, GPU and free disk space, and **asks before downloading
-any model**. Every model prompt defaults to *No*. If you skip the models, the
-**built-in engine** still answers calc/text commands, questions about AAP, and
-short coding/security/design/data tips. LLM answers switch on automatically once
-a model is installed (`ollama pull llama3.2:3b`), with no restart needed. If the
-coding model is missing, coding questions use the default model.
+Then continue at [Start the server](#start-the-server).
 
-Non-interactive: `npm run setup -- --no-input --skip-models` · accept everything:
-`npm run setup -- --yes`.
+### Option B: manual setup
 
-### First run
+**1. Install the prerequisites**
 
-On first boot the server creates a super admin and a demo user and prints
-their generated passwords **once**. You can set them instead with
-`ADMIN_PASSWORD` and `DEMO_USER_PASSWORD`.
+| | Linux (Debian/Ubuntu) | macOS (Homebrew) | Windows |
+|---|---|---|---|
+| Node.js 20.19+ | `curl -fsSL https://deb.nodesource.com/setup_20.x \| sudo -E bash - && sudo apt install -y nodejs` | `brew install node@20` | installer from [nodejs.org](https://nodejs.org) |
+| Python 3 | `sudo apt install -y python3 python3-venv python3-pip` | `brew install python` | installer from [python.org](https://python.org) (tick "Add to PATH") |
+| MongoDB | [install guide](https://www.mongodb.com/docs/manual/administration/install-on-linux/) or `docker run -d --name aap-mongo -p 27017:27017 mongo:7` | `brew tap mongodb/brew && brew install mongodb-community && brew services start mongodb-community` | [MongoDB installer](https://www.mongodb.com/try/download/community) or Docker |
+| Ollama *(optional)* | `curl -fsSL https://ollama.com/install.sh \| sh` | `brew install ollama` | installer from [ollama.com](https://ollama.com/download) |
 
-1. Log in at `http://localhost:3000` and click **Generate new key**. You can
-   view it again later with **Show key** and your password.
-2. Run the client and approve its pairing code on your dashboard:
+Check them: `node -v` (≥ 20.19), `python3 --version`, and `mongosh --eval "db.runCommand({ping:1})"`
+(or `docker ps` if you use the container).
+
+**2. Get the code and install the server dependencies**
+
+```bash
+git clone https://github.com/parag25mcf10022/API-Token_Abuse-protection-POC.git
+cd API-Token_Abuse-protection-POC
+npm install
+```
+
+**3. Install the Python dependencies (`requirements.txt`)**
+
+The terminal clients (`client.py`, `org_client.py`) need the packages listed in
+`requirements.txt`. Use a virtual environment so nothing touches your system Python:
+
+```bash
+# Linux / macOS
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+# Windows (PowerShell)
+py -m venv .venv
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+```
+
+Activate the environment again (`source .venv/bin/activate`) in any new terminal
+before running the clients. If you'd rather not use a venv:
+`pip install --user -r requirements.txt` (or `sudo apt install python3-requests`
+on Debian-based systems).
+
+**4. (Optional) Download LLM models**
+
+Skip this step to use the built-in engine only. It answers calc/text commands,
+questions about AAP, and short coding/security/design/data tips.
+
+```bash
+ollama pull llama3.2:3b        # ~2.0 GB — general answers (default model)
+ollama pull qwen2.5-coder:7b   # ~4.7 GB — coding questions (optional)
+```
+
+Models can be added later. The server picks them up within a minute, with no
+restart. If the coding model is missing, coding questions use the default model.
+
+### Start the server
+
+```bash
+npm start                      # → http://localhost:3000
+```
+
+On first start the server creates a **super admin** (`admin@example.com`) and a
+**demo user** (`user@example.com`), and prints their generated passwords
+**once** in the terminal. Save them. To choose them yourself, start with
+`ADMIN_PASSWORD='…' DEMO_USER_PASSWORD='…' npm start`. Other settings are listed
+under [Configuration](#configuration).
+
+### Use it
+
+1. Open **http://localhost:3000** and log in. Click **Generate new key** (it asks
+   for your password). You can view it again later with **Show key**.
+2. In a terminal, with the venv active:
    ```bash
    AAP_API_KEY=ak_... python3 client.py
+   # Windows PowerShell:  $env:AAP_API_KEY="ak_..."; py client.py
    ```
-   While it waits, the client says exactly what's missing: device approval,
-   login, admin enable, or a locked key, in which case you can paste the new
-   key right in the client.
-3. Chat. Replies stream in, with `/help` for commands. Log out in the browser and
+   The client prints a **pairing code**. Approve that device on the dashboard
+   **of the account that owns the key** (approval is per account). While it
+   waits, the client says what's missing: device approval, login, admin
+   enable, or a locked or invalid key. For the last two you can paste a new key
+   without restarting.
+3. Chat. Replies stream in; `/help` lists commands. Log out in the browser and
    the key stops working.
 
 ```text
@@ -85,8 +149,20 @@ their generated passwords **once**. You can set them instead with
   ↳ coding · llm · qwen2.5-coder:7b · 370 tok · 14.5s
 ```
 
-CLI extras: `/usage` (meters against your limits), `/model`, `/device`, `/clear`,
+CLI extras: `/usage` (quotas per category), `/model`, `/device`, `/clear`,
 `/save chat.md`, one-shot `python3 client.py -p "question"`, and `--no-stream`.
+
+### Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| `Failed to start AAP server … MongoDB` | Start MongoDB (`sudo systemctl start mongod`, `brew services start mongodb-community`, or the Docker command above), or set `MONGO_URL`. |
+| `error: externally-managed-environment` from pip | Use the virtual environment from step 3. |
+| `ModuleNotFoundError: No module named 'requests'` | Activate the venv (`source .venv/bin/activate`), then `pip install -r requirements.txt`. |
+| Client keeps waiting after you approved the device | Make sure you approved it on the dashboard of the **account that owns the key**. The client tells you if it's approved for a different account. |
+| Client says the key is not valid | The key was regenerated or revoked. Use **Show key** on the dashboard and paste it into the client. |
+| `EADDRINUSE: port 3000` | Another process uses the port. Stop it or run `PORT=3001 npm start`. |
+| Replies say "I don't have a canned answer" | No LLM is available. Install Ollama and pull a model (step 4), or ask your admin to allow LLM access. |
 
 ## Features
 
@@ -102,6 +178,8 @@ CLI extras: `/usage` (meters against your limits), `/model`, `/device`, `/clear`
 | **Scopes** | Each message is classified as `general`, `math`, `text`, `coding`, `cyber`, `design` or `data`, and is allowed only if it's within the key's scopes. |
 | **Usage limits** | Requests per minute, day and month; tokens per day and month; daily caps per category. Set per user and per org pool, by admins only. |
 | **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 5+ new unapproved devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
+| **Quotas & notifications** | The dashboard lists every category with its daily quota, usage and remaining allowance, and **why** a category is unavailable (not in your plan, blocked by your org, quota 0, used up). You're notified at **50%, 75%, 90% and 99%** of any quota, on the dashboard (with a pop-up while it's open) and inline in the CLI. Org-pool warnings reach every member. |
+| **Context-aware classification** | Natural questions ("what's 2+3?", "summarize this", "center a div") land in the right category. Short follow-ups ("explain it more simply") keep the conversation's category; unrelated questions don't, even with a forged history. Blocked messages say which category they were put in and which ones you're allowed. |
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
 | **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
@@ -132,9 +210,10 @@ rejected.
 | POST | `/auth/rotate-key` | session + password | New API key; old one dies (locked org members need approval) |
 | POST | `/auth/protection` | session + password | Personal accounts: action on compromise |
 | POST | `/auth/change-password` | session + current password | Set a new password; ends other sessions |
+| POST | `/auth/notices/dismiss` | session | Mark one (`id`) or all quota notifications read |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
-| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}`, plus a `reason` only for the owner's approved devices |
+| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active, reason}`. Reasons: `invalid_key`, `device_not_approved`, `device_approved_for_other_account`; the owner's approved devices also get `no_session`, `key_disabled`, `key_locked` |
 | POST | `/api/message` | `X-API-Key`, `X-AAP-Device` | Protected endpoint; `stream: true` for NDJSON, optional `history` |
 | GET | `/api/usage` · `/api/engine` | `X-API-Key`, `X-AAP-Device` | Your limits/usage · engine status |
 | * | `/api/admin/*` | admin session | Admin API |

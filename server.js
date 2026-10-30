@@ -445,6 +445,16 @@ async function main() {
     res.json({ ok: true, otherSessionsEnded: deletedCount });
   }));
 
+  // Mark quota notifications as read (one by id, or all).
+  app.post('/auth/notices/dismiss', requireLogin, wrap(async (req, res) => {
+    const { id } = req.body || {};
+    if (id !== undefined && !(typeof id === 'string' && /^[0-9a-f]{12}$/.test(id))) {
+      return res.status(400).json({ error: 'Invalid notice id.' });
+    }
+    await db.dismissNotices(req.session.userId, id || null);
+    res.json({ ok: true });
+  }));
+
   // --- Device management (owner only, scoped to the session's user) -------
   const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
 
@@ -470,6 +480,7 @@ async function main() {
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     const org = await db.getOrg(user.orgId);
+    const userUsage = await usage.summary(`u:${user.id}`);
     res.json({
       email: user.email,
       apiKeyPrefix: user.apiKeyPrefix, // full key only via /auth/reveal-key
@@ -492,7 +503,15 @@ async function main() {
       scopes: policyLib.allowedScopes(user.policy, org && org.policy),
       llmAllowed: llm.enabled() && policyLib.llmAllowed(user.policy, org && org.policy),
       limits: (user.policy && user.policy.limits) || {},
-      usage: await usage.summary(`u:${user.id}`),
+      usage: userUsage,
+      // Every category with its quota and whether it's usable right now (and why not).
+      categories: policyLib.categoryStatus({
+        userPolicy: user.policy,
+        orgPolicy: org && org.policy,
+        userUsage,
+        orgUsage: org ? await usage.summary(`o:${org.id}`) : null,
+      }),
+      notices: (user.notices || []).slice(-15).reverse(),
     });
   }));
 
@@ -537,19 +556,17 @@ async function main() {
     if (apiKey === null) return;
     const deviceToken = readDeviceToken(req, res);
     if (deviceToken === null) return;
-    if (!security.isApiKey(apiKey)) {
-      // Same answer as an unknown key — don't reveal what's malformed.
-      return res.json({ active: false });
-    }
-    const user = await db.getUserByApiKey(apiKey);
-    if (!user) {
-      // Don't leak whether a key exists; just report "no session".
-      return res.json({ active: false });
-    }
+    // An unknown key learns only that it's not valid (as /api/message says
+    // too) — so a client holding an old/rotated key can ask for a new one.
+    const user = security.isApiKey(apiKey) ? await db.getUserByApiKey(apiKey) : null;
+    if (!user) return res.json({ active: false, reason: 'invalid_key' });
     // Device first: an unapproved device learns only that it needs approval
     // (which /api/message already reveals) — never the account's state.
     if (!(await deviceApproved(user, deviceToken, req))) {
-      return res.json({ active: false, reason: 'device_not_approved' });
+      // Approval is per account: say so if this machine is approved for a
+      // different account (a common mix-up), without naming that account.
+      const elsewhere = await db.deviceApprovedElsewhere(user.id, deviceToken);
+      return res.json({ active: false, reason: elsewhere ? 'device_approved_for_other_account' : 'device_not_approved' });
     }
     // From an owner-approved device, say WHY the key isn't usable so the
     // client can guide its owner instead of waiting blindly.
@@ -660,11 +677,13 @@ async function main() {
 
     // 6. Scope: is this key allowed to use this content category?
     const org = await db.getOrg(user.orgId);
-    const category = engine.classify(msg.value);
-    if (!policyLib.allowedScopes(user.policy, org && org.policy).includes(category)) {
+    const category = engine.classify(msg.value, hist.value);
+    const allowed = policyLib.allowedScopes(user.policy, org && org.policy);
+    if (!allowed.includes(category)) {
       return res.status(403).json({
-        error: `Forbidden: your key is not allowed to use the "${category}" category.`,
+        error: `Forbidden: this message was classified as "${category}", which your key isn't allowed to use. Allowed: ${allowed.join(', ') || 'none'}.`,
         category,
+        allowed,
       });
     }
 
@@ -713,12 +732,21 @@ async function main() {
       : policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(out.reply);
     await usage.record(user, org, category, tokens);
 
+    // Did this request push any quota past 50/75/90/99%? Save it for the
+    // dashboard (org-pool notices go to every member) and return it inline.
+    const notices = await usage.quotaNotices(user, org, category, tokens);
+    if (notices.length) {
+      await db.addNotices(user.id, notices.filter((n) => n.scope === 'user'));
+      if (org) await db.addOrgNotices(org.id, notices.filter((n) => n.scope === 'org'));
+    }
+
     const meta = {
       source: out.source, // "rule" | "faq" | "cache" | "llm" | "fallback"
       category,
       tokens,
       model: out.model || null,
       truncated: !!out.truncated,
+      notices: notices.map((n) => ({ level: n.level, text: n.text })),
       ms: Date.now() - started,
       processedAt: new Date().toISOString(),
     };
@@ -742,6 +770,12 @@ async function main() {
       llm: llm.enabled() && policyLib.llmAllowed(user.policy, org && org.policy),
       limits: (user.policy && user.policy.limits) || {},
       usage: await usage.summary(`u:${user.id}`),
+      categories: policyLib.categoryStatus({
+        userPolicy: user.policy,
+        orgPolicy: org && org.policy,
+        userUsage: await usage.summary(`u:${user.id}`),
+        orgUsage: org ? await usage.summary(`o:${org.id}`) : null,
+      }),
     });
   }));
 

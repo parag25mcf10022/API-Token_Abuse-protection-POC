@@ -80,6 +80,14 @@
         </div>
       </div>
 
+      <section id="notices" class="card notices hidden">
+        <div class="card-head">
+          <h2>Notifications <span id="notice-count" class="pill warnpill"></span></h2>
+          <button id="notices-dismiss" class="ghost small">Mark all read</button>
+        </div>
+        <ul id="notice-list" class="notice-list"></ul>
+      </section>
+
       <div id="pw-banner" class="callout danger hidden">
         <strong>Set your own password.</strong>
         Your admin chose your current password, so key actions are paused until you
@@ -195,7 +203,7 @@
         </section>
 
         <!-- ENGINE -->
-        <section class="card">
+        <section class="card span-2">
           <div class="card-head">
             <h2>Engine</h2>
             <span id="engine-state" class="pill neutral">checking…</span>
@@ -212,13 +220,22 @@
           </p>
         </section>
 
-        <!-- TODAY BY CATEGORY -->
-        <section class="card">
+        <!-- CATEGORIES & QUOTAS -->
+        <section class="card span-2">
           <div class="card-head">
-            <h2>Today by category</h2>
+            <h2>Categories &amp; quotas</h2>
+            <span class="muted small">What your key may use today, and why anything is unavailable</span>
           </div>
-          <div id="category-bars" class="catbars"></div>
-          <p id="category-empty" class="empty hidden">No requests yet today.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Category</th><th>Daily quota</th><th>Used today</th><th>Remaining</th><th>Status</th></tr></thead>
+              <tbody id="category-table"></tbody>
+            </table>
+          </div>
+          <p class="muted small">
+            Categories without their own quota share your overall daily limit
+            (<span id="overall-daily"></span>). You'll get a notification at 50%, 75%, 90% and 99% of any quota.
+          </p>
         </section>
 
         <!-- MASTER KEY (org admins) -->
@@ -267,6 +284,7 @@
     </section>
   </main>
 
+  <div id="toast" class="toast hidden" role="status" aria-live="polite"></div>
   <script src="/app.js"></script>
 </body>
 </html>

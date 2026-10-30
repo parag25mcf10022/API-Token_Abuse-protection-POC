@@ -128,6 +128,63 @@ async function record(user, org, category, tokens) {
   await usage.bulkWrite(ops, { ordered: false });
 }
 
+// --- Quota notifications -----------------------------------------------------
+const THRESHOLDS = [50, 75, 90, 99];
+
+const LABELS = {
+  requestsPerDay: ['daily requests', 'day'],
+  requestsPerMonth: ['monthly requests', 'month'],
+  tokensPerDay: ['daily tokens', 'day'],
+  tokensPerMonth: ['monthly tokens', 'month'],
+};
+
+/**
+ * After a request is recorded: which 50/75/90/99% thresholds did THIS request
+ * cross? Each crossing happens exactly once per period, so notices aren't
+ * repeated. Returns [{ key, scope, level, text, percent }].
+ */
+async function quotaNotices(user, org, category, tokens) {
+  const now = new Date();
+  const periodId = { day: now.toISOString().slice(0, 10), month: now.toISOString().slice(0, 7) };
+  const out = [];
+  for (const s of subjects(user, org)) {
+    const l = (s.policy && s.policy.limits) || {};
+    const c = await countersFor(s.key, now);
+    const checks = [
+      ['requestsPerDay', c.day.requests, 1],
+      ['requestsPerMonth', c.month.requests, 1],
+      ['tokensPerDay', c.day.tokens, tokens],
+      ['tokensPerMonth', c.month.tokens, tokens],
+    ];
+    const catCap = l.categoryRequestsPerDay && l.categoryRequestsPerDay[category];
+    if (Number.isInteger(catCap)) {
+      checks.push([`category:${category}`, (c.day.cat && c.day.cat[category]) || 0, 1, catCap]);
+    }
+    for (const [name, after, inc, capOverride] of checks) {
+      const cap = capOverride !== undefined ? capOverride : l[name];
+      if (!Number.isInteger(cap) || cap <= 0) continue;
+      const before = ((after - inc) / cap) * 100;
+      const now_ = (after / cap) * 100;
+      const crossed = THRESHOLDS.filter((t) => before < t && now_ >= t);
+      if (!crossed.length) continue;
+      const t = crossed[crossed.length - 1];
+      const isCat = name.startsWith('category:');
+      const what = isCat ? `today's ${category} quota` : LABELS[name][0];
+      const period = isCat ? periodId.day : periodId[LABELS[name][1]];
+      const who = s.level === 'org' ? 'Your organization has used' : "You've used";
+      const amount = after >= cap ? 'all' : `${t}%`;
+      out.push({
+        key: `${s.key}|${name}|${period}|${t}`,
+        scope: s.level,
+        level: t >= 99 ? 'critical' : t >= 90 ? 'warn' : 'info',
+        percent: t,
+        text: `${who} ${amount} of ${s.level === 'org' && !isCat ? 'its pooled ' : ''}${what} (${after.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')}).`,
+      });
+    }
+  }
+  return out;
+}
+
 /** Usage snapshot for display: today and this month. */
 async function summary(subjectKey) {
   const c = await countersFor(subjectKey);
@@ -135,4 +192,4 @@ async function summary(subjectKey) {
   return { today: pick(c.day), month: pick(c.month) };
 }
 
-module.exports = { init, check, record, summary };
+module.exports = { init, check, record, summary, quotaNotices, THRESHOLDS };

@@ -148,13 +148,7 @@ function showDashboard(user) {
     `Limits: ${fmt(l.burstPerMinute)}/min · ${fmt(l.requestsPerDay)} req/day · ` +
     `${fmt(l.requestsPerMonth)} req/month · ${fmt(l.tokensPerDay)} tokens/day · ` +
     `${fmt(l.tokensPerMonth)} tokens/month${cats.length ? ' · ' + cats.join(', ') : ''}`;
-  const u = user.usage;
-  $('usage-meters').replaceChildren(
-    usageRow('Requests today', u.today.requests, l.requestsPerDay),
-    usageRow('Requests this month', u.month.requests, l.requestsPerMonth),
-    usageRow('Tokens today', u.today.tokens, l.tokensPerDay),
-    usageRow('Tokens this month', u.month.tokens, l.tokensPerMonth)
-  );
+  renderUsage(user);
 
   $('master-box').classList.toggle('hidden', !orgAdmin);
   if (orgAdmin) {
@@ -183,27 +177,114 @@ async function loadEngine(user) {
     : 'Local engine only (set by your admin)';
 }
 
-function renderCategories(byCategory) {
-  const box = $('category-bars');
-  box.replaceChildren();
-  const entries = Object.entries(byCategory || {}).sort((a, b) => b[1] - a[1]);
-  $('category-empty').classList.toggle('hidden', entries.length > 0);
-  const max = Math.max(1, ...entries.map(([, n]) => n));
-  for (const [cat, n] of entries) {
-    const row = document.createElement('div');
-    row.className = 'catbar';
-    const name = document.createElement('span');
-    name.textContent = cat;
-    const m = document.createElement('meter');
-    m.min = 0;
-    m.max = max;
-    m.value = n;
-    const count = document.createElement('span');
-    count.className = 'muted';
-    count.textContent = n.toLocaleString();
-    row.append(name, m, count);
-    box.append(row);
+
+// Usage meters against the configured limits (also redrawn by the refresh).
+function renderUsage(user) {
+  const l = user.limits || {};
+  const u = user.usage;
+  $('usage-meters').replaceChildren(
+    usageRow('Requests today', u.today.requests, l.requestsPerDay),
+    usageRow('Requests this month', u.month.requests, l.requestsPerMonth),
+    usageRow('Tokens today', u.today.tokens, l.tokensPerDay),
+    usageRow('Tokens this month', u.month.tokens, l.tokensPerMonth)
+  );
+}
+
+// --- Categories & quotas -------------------------------------------------------
+const STATUS_TEXT = {
+  ok: ['ok', 'Available'],
+  not_in_plan: ['off', 'Not in your plan'],
+  blocked_by_org: ['off', 'Blocked by your organization'],
+  cap_is_zero: ['off', 'Quota set to 0 by your admin'],
+  cap_reached: ['warn', "Today's quota used up"],
+  org_cap_reached: ['warn', "Organization's quota for this category used up"],
+  daily_requests_used_up: ['warn', 'Daily request quota used up'],
+  monthly_requests_used_up: ['warn', 'Monthly request quota used up'],
+  daily_tokens_used_up: ['warn', 'Daily token quota used up'],
+  monthly_tokens_used_up: ['warn', 'Monthly token quota used up'],
+  org_daily_pool_used_up: ['warn', "Organization's daily pool used up"],
+  org_monthly_pool_used_up: ['warn', "Organization's monthly pool used up"],
+  org_daily_tokens_used_up: ['warn', "Organization's daily tokens used up"],
+};
+
+function renderCategoryTable(user) {
+  const tbody = $('category-table');
+  tbody.replaceChildren();
+  const l = user.limits || {};
+  $('overall-daily').textContent = Number.isInteger(l.requestsPerDay)
+    ? `${user.usage.today.requests.toLocaleString()} / ${l.requestsPerDay.toLocaleString()} requests`
+    : 'unlimited';
+  const td = (...c) => { const e = document.createElement('td'); e.append(...c); return e; };
+  for (const c of user.categories || []) {
+    const name = document.createElement('div');
+    name.textContent = c.category;
+    const desc = document.createElement('div');
+    desc.className = 'muted small';
+    desc.textContent = c.description;
+    const [tone, text] = STATUS_TEXT[c.status] || ['warn', c.status];
+    const badge = document.createElement('span');
+    badge.className = `badge ${tone === 'ok' ? 'on' : tone}`;
+    badge.textContent = text;
+    let quota = c.cap === null ? 'shared daily quota' : `${c.cap.toLocaleString()} / day`;
+    if (!c.inPlan) quota = '—';
+    const row = document.createElement('tr');
+    if (!c.inPlan) row.className = 'dim-row';
+    let usedCell = c.used.toLocaleString();
+    if (c.cap) {
+      const m = document.createElement('meter');
+      m.min = 0; m.max = c.cap; m.value = Math.min(c.used, c.cap);
+      m.low = c.cap * 0.75; m.high = c.cap * 0.9; m.optimum = 0;
+      usedCell = document.createElement('div');
+      usedCell.className = 'used-cell';
+      const n = document.createElement('span');
+      n.textContent = c.used.toLocaleString();
+      usedCell.append(n, m);
+    }
+    row.append(td(name, desc), td(quota), td(usedCell), td(c.remaining === null ? '—' : c.remaining.toLocaleString()), td(badge));
+    tbody.append(row);
   }
+}
+
+// --- Notifications (quota warnings at 50/75/90/99%) ---------------------------
+let seenNotices = null; // ids already shown, so only new ones raise a toast
+
+function renderNotices(list) {
+  const unread = list.filter((n) => !n.read);
+  $('notices').classList.toggle('hidden', unread.length === 0);
+  $('notice-count').textContent = unread.length;
+  const ul = $('notice-list');
+  ul.replaceChildren();
+  for (const n of unread) {
+    const li = document.createElement('li');
+    li.className = `notice ${n.level}`;
+    const text = document.createElement('span');
+    text.textContent = n.text;
+    const when = document.createElement('span');
+    when.className = 'muted small';
+    when.textContent = new Date(n.at).toLocaleString();
+    const x = document.createElement('button');
+    x.className = 'ghost small';
+    x.textContent = 'Dismiss';
+    x.onclick = async () => {
+      await api('/auth/notices/dismiss', { method: 'POST', body: JSON.stringify({ id: n.id }) });
+      loadDashboard();
+    };
+    li.append(text, when, x);
+    ul.append(li);
+  }
+  // Toast for notices that arrived since the last refresh (e.g. from CLI use).
+  const fresh = seenNotices ? unread.filter((n) => !seenNotices.has(n.id)) : [];
+  seenNotices = new Set(list.map((n) => n.id));
+  if (fresh.length) showToast(fresh[0].text, fresh[0].level);
+}
+
+let toastTimer = null;
+function showToast(text, level) {
+  const t = $('toast');
+  t.textContent = text;
+  t.className = `toast ${level}`;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.add('hidden'), 8000);
 }
 
 // The dashboard always renders from /auth/me so key state and session count
@@ -215,7 +296,8 @@ async function loadDashboard(newKey) {
   if (newKey) revealKey(newKey);
   loadDevices();
   loadEngine(data);
-  renderCategories(data.usage.today.byCategory);
+  renderCategoryTable(data);
+  renderNotices(data.notices || []);
 }
 
 // --- Devices ----------------------------------------------------------------
@@ -416,6 +498,22 @@ $('copy-btn').onclick = async () => {
 };
 
 $('devices-refresh').onclick = loadDevices;
+
+$('notices-dismiss').onclick = async () => {
+  await api('/auth/notices/dismiss', { method: 'POST', body: '{}' });
+  loadDashboard();
+};
+
+// Keep quotas and notifications fresh while the dashboard is open (cheap: one
+// /auth/me call every 20 s, paused when the tab is hidden).
+setInterval(async () => {
+  if (document.hidden || $('dash-view').classList.contains('hidden')) return;
+  const { ok, data } = await api('/auth/me');
+  if (!ok) return;
+  renderUsage(data);
+  renderCategoryTable(data);
+  renderNotices(data.notices || []);
+}, 20000);
 
 $('master-form').onsubmit = async (e) => {
   e.preventDefault();

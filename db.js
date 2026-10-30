@@ -289,6 +289,15 @@ function deviceCode(deviceHash) {
   return `${c.slice(0, 3)}-${c.slice(3)}`;
 }
 
+/** Is this device approved for some OTHER account? (to explain per-account approval) */
+async function deviceApprovedElsewhere(userId, token) {
+  const d = await devices.findOne(
+    { userId: { $ne: userId }, deviceHash: hashDeviceToken(token), status: 'approved' },
+    { projection: { _id: 1 } }
+  );
+  return !!d;
+}
+
 function getDevice(userId, token) {
   return devices.findOne({ userId, deviceHash: hashDeviceToken(token) });
 }
@@ -415,6 +424,44 @@ function countDevicesSince(userId, since) {
   return devices.countDocuments({ userId, status: 'pending', createdAt: { $gt: since } });
 }
 
+// --- User notifications (quota warnings) -------------------------------------
+// Stored on the user (newest 30). `key` makes each crossing land only once.
+
+function noticeDoc(n) {
+  return { id: crypto.randomBytes(6).toString('hex'), key: n.key, level: n.level, text: n.text, at: new Date(), read: false };
+}
+
+/** Add notices for one user, skipping any whose key is already there. */
+async function addNotices(userId, notices) {
+  for (const n of notices) {
+    await users.updateOne(
+      { id: Number(userId), 'notices.key': { $ne: n.key } },
+      { $push: { notices: { $each: [noticeDoc(n)], $slice: -30 } } }
+    );
+  }
+}
+
+/** Org-pool notices go to every member of the org. */
+async function addOrgNotices(orgId, notices) {
+  for (const n of notices) {
+    await users.updateMany(
+      { orgId: Number(orgId), 'notices.key': { $ne: n.key } },
+      { $push: { notices: { $each: [noticeDoc(n)], $slice: -30 } } }
+    );
+  }
+}
+
+/** Mark one notice (id) or all notices (id = null) as read. */
+function dismissNotices(userId, id) {
+  if (id) {
+    return users.updateOne({ id: Number(userId), 'notices.id': String(id) }, { $set: { 'notices.$.read': true } });
+  }
+  return users.updateOne(
+    { id: Number(userId), notices: { $type: 'array' } },
+    { $set: { 'notices.$[].read': true } }
+  );
+}
+
 function setUserPolicy(userId, policy) {
   return users.updateOne({ id: Number(userId) }, { $set: { policy } });
 }
@@ -504,6 +551,7 @@ module.exports = {
   setKeyEnabled,
   setPassword,
   getDevice,
+  deviceApprovedElsewhere,
   registerPendingDevice,
   touchDevice,
   listDevices,
@@ -516,6 +564,9 @@ module.exports = {
   revokeApiKey,
   noteLoginIp,
   setUserPolicy,
+  addNotices,
+  addOrgNotices,
+  dismissNotices,
   setKeyLock,
   approveRegeneration,
   setProtection,
