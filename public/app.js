@@ -196,12 +196,13 @@ const STATUS_TEXT = {
   not_in_plan: ['off', 'Not in your plan'],
   blocked_by_org: ['off', 'Blocked by your organization'],
   cap_is_zero: ['off', 'Quota set to 0 by your admin'],
-  cap_reached: ['warn', "Today's quota used up"],
+  cap_reached: ['warn', "Today's request quota used up"],
+  token_cap_reached: ['warn', "Today's token quota used up"],
   org_cap_reached: ['warn', "Organization's quota for this category used up"],
-  daily_requests_used_up: ['warn', 'Daily request quota used up'],
-  monthly_requests_used_up: ['warn', 'Monthly request quota used up'],
-  daily_tokens_used_up: ['warn', 'Daily token quota used up'],
-  monthly_tokens_used_up: ['warn', 'Monthly token quota used up'],
+  account_daily_requests_used_up: ['warn', 'Account-wide daily request limit reached'],
+  account_monthly_requests_used_up: ['warn', 'Account-wide monthly request limit reached'],
+  account_daily_tokens_used_up: ['warn', 'Account-wide daily token limit reached'],
+  account_monthly_tokens_used_up: ['warn', 'Account-wide monthly token limit reached'],
   org_daily_pool_used_up: ['warn', "Organization's daily pool used up"],
   org_monthly_pool_used_up: ['warn', "Organization's monthly pool used up"],
   org_daily_tokens_used_up: ['warn', "Organization's daily tokens used up"],
@@ -211,36 +212,55 @@ function renderCategoryTable(user) {
   const tbody = $('category-table');
   tbody.replaceChildren();
   const l = user.limits || {};
-  $('overall-daily').textContent = Number.isInteger(l.requestsPerDay)
-    ? `${user.usage.today.requests.toLocaleString()} / ${l.requestsPerDay.toLocaleString()} requests`
-    : 'unlimited';
+  const n = (v) => Number(v).toLocaleString();
+  // Only mention account-wide ceilings if an admin actually set one.
+  const ceilings = [
+    ['requestsPerDay', 'requests/day', user.usage.today.requests],
+    ['tokensPerDay', 'tokens/day', user.usage.today.tokens],
+    ['requestsPerMonth', 'requests/month', user.usage.month.requests],
+    ['tokensPerMonth', 'tokens/month', user.usage.month.tokens],
+  ].filter(([k]) => Number.isInteger(l[k])).map(([k, label, used]) => `${n(used)} / ${n(l[k])} ${label}`);
+  $('overall-daily').textContent = ceilings.length
+    ? `Your admin also set an account-wide limit that applies to all categories: ${ceilings.join(', ')}.`
+    : '';
   const td = (...c) => { const e = document.createElement('td'); e.append(...c); return e; };
+  const line = (text, cls) => { const d = document.createElement('div'); d.textContent = text; if (cls) d.className = cls; return d; };
+  const cost = user.costPerRequest || {};
   for (const c of user.categories || []) {
-    const name = document.createElement('div');
-    name.textContent = c.category;
-    const desc = document.createElement('div');
-    desc.className = 'muted small';
-    desc.textContent = c.description;
     const [tone, text] = STATUS_TEXT[c.status] || ['warn', c.status];
     const badge = document.createElement('span');
     badge.className = `badge ${tone === 'ok' ? 'on' : tone}`;
     badge.textContent = text;
-    let quota = c.cap === null ? 'shared daily quota' : `${c.cap.toLocaleString()} / day`;
-    if (!c.inPlan) quota = '—';
     const row = document.createElement('tr');
     if (!c.inPlan) row.className = 'dim-row';
-    let usedCell = c.used.toLocaleString();
-    if (c.cap) {
+
+    const quota = !c.inPlan ? [line('—')] : [
+      line(c.cap === null ? 'unlimited requests' : `${n(c.cap)} requests`),
+      line(c.tokenCap === null ? 'unlimited tokens' : `${n(c.tokenCap)} tokens`, 'muted small'),
+    ];
+    const used = document.createElement('div');
+    used.className = 'used-cell';
+    const usedText = line(`${n(c.used)} req`);
+    used.append(usedText);
+    const shown = c.cap ? [c.used, c.cap] : c.tokenCap ? [c.usedTokens, c.tokenCap] : null;
+    if (shown) {
       const m = document.createElement('meter');
-      m.min = 0; m.max = c.cap; m.value = Math.min(c.used, c.cap);
-      m.low = c.cap * 0.75; m.high = c.cap * 0.9; m.optimum = 0;
-      usedCell = document.createElement('div');
-      usedCell.className = 'used-cell';
-      const n = document.createElement('span');
-      n.textContent = c.used.toLocaleString();
-      usedCell.append(n, m);
+      m.min = 0; m.max = shown[1]; m.value = Math.min(shown[0], shown[1]);
+      m.low = shown[1] * 0.75; m.high = shown[1] * 0.9; m.optimum = 0;
+      used.append(m);
     }
-    row.append(td(name, desc), td(quota), td(usedCell), td(c.remaining === null ? '—' : c.remaining.toLocaleString()), td(badge));
+    const remaining = !c.inPlan ? [line('—')] : [
+      line(c.remaining === null ? '—' : `${n(c.remaining)} req`),
+      line(c.tokensRemaining === null ? '' : `${n(c.tokensRemaining)} tok`, 'muted small'),
+    ];
+    row.append(
+      td(line(c.category), line(c.description, 'muted small')),
+      td(...quota),
+      td(used, line(`${n(c.usedTokens)} tok`, 'muted small')),
+      td(...remaining),
+      td(cost[c.category] ? `~${n(cost[c.category])}` : '—'),
+      td(badge)
+    );
     tbody.append(row);
   }
 }

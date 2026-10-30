@@ -228,13 +228,15 @@
           </div>
           <div class="table-wrap">
             <table>
-              <thead><tr><th>Category</th><th>Daily quota</th><th>Used today</th><th>Remaining</th><th>Status</th></tr></thead>
+              <thead><tr><th>Category</th><th>Daily quota</th><th>Used today</th><th>Remaining</th><th>≈ tokens / request</th><th>Status</th></tr></thead>
               <tbody id="category-table"></tbody>
             </table>
           </div>
           <p class="muted small">
-            Categories without their own quota share your overall daily limit
-            (<span id="overall-daily"></span>). You'll get a notification at 50%, 75%, 90% and 99% of any quota.
+            Each category has its own daily quota — using one never uses up another.
+            <span id="overall-daily"></span>
+            A request costs roughly its message + reply in tokens (≈ characters ÷ 4); LLM answers cost far more
+            than instant local ones. You'll get a notification at 50%, 75%, 90% and 99% of any quota.
           </p>
         </section>
 

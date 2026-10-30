@@ -3,7 +3,7 @@
  *
  * Counters are kept per subject (a user "u:<id>" or an org "o:<id>") in UTC
  * buckets — minute, day, month — each document holding
- * { requests, tokens, cat: { <category>: requests } }. A TTL index drops old
+ * { requests, tokens, cat: { <category>: requests }, ctok: { <category>: tokens } }. A TTL index drops old
  * buckets automatically.
  *
  * check() runs before the request is processed and record() after, so under
@@ -12,6 +12,8 @@
  */
 
 'use strict';
+
+const { categoryCaps } = require('./policy');
 
 const MIN_MS = 60 * 1000;
 const DAY_MS = 24 * 60 * MIN_MS;
@@ -78,17 +80,17 @@ async function check(user, org, category, estTokens) {
       ['tokensPerDay', 'day', c.day.tokens + estTokens],
       ['tokensPerMonth', 'month', c.month.tokens + estTokens],
     ];
-    const catMax = l.categoryRequestsPerDay && l.categoryRequestsPerDay[category];
-    if (Number.isInteger(catMax)) {
-      const used = (c.day.cat && c.day.cat[category]) || 0;
-      if (used + 1 > catMax) {
-        return {
-          ok: false,
-          level: s.level,
-          limit: `categoryRequestsPerDay.${category}`,
-          max: catMax,
-          retryAfterSec: secondsUntilReset('day', now),
-        };
+    // This category's own daily quota (requests and tokens) — independent of
+    // every other category.
+    const caps = categoryCaps(l, category);
+    const catReq = ((c.day.cat || {})[category] || 0) + 1;
+    const catTok = ((c.day.ctok || {})[category] || 0) + estTokens;
+    for (const [name, wouldBe, cap] of [
+      [`${category} requests/day`, catReq, caps.requests],
+      [`${category} tokens/day`, catTok, caps.tokens],
+    ]) {
+      if (Number.isInteger(cap) && wouldBe > cap) {
+        return { ok: false, level: s.level, limit: name, max: cap, retryAfterSec: secondsUntilReset('day', now) };
       }
     }
     for (const [name, kind, wouldBe] of rules) {
@@ -117,7 +119,7 @@ async function record(user, org, category, tokens) {
         updateOne: {
           filter: { _id: `${s.key}|${x.id}` },
           update: {
-            $inc: { requests: 1, tokens, [`cat.${category}`]: 1 },
+            $inc: { requests: 1, tokens, [`cat.${category}`]: 1, [`ctok.${category}`]: tokens },
             $setOnInsert: { expiresAt: new Date(now.getTime() + x.ttl) },
           },
           upsert: true,
@@ -156,9 +158,12 @@ async function quotaNotices(user, org, category, tokens) {
       ['tokensPerDay', c.day.tokens, tokens],
       ['tokensPerMonth', c.month.tokens, tokens],
     ];
-    const catCap = l.categoryRequestsPerDay && l.categoryRequestsPerDay[category];
-    if (Number.isInteger(catCap)) {
-      checks.push([`category:${category}`, (c.day.cat && c.day.cat[category]) || 0, 1, catCap]);
+    const caps = categoryCaps(l, category);
+    if (Number.isInteger(caps.requests)) {
+      checks.push([`category:${category}`, (c.day.cat && c.day.cat[category]) || 0, 1, caps.requests]);
+    }
+    if (Number.isInteger(caps.tokens)) {
+      checks.push([`categoryTokens:${category}`, (c.day.ctok && c.day.ctok[category]) || 0, tokens, caps.tokens]);
     }
     for (const [name, after, inc, capOverride] of checks) {
       const cap = capOverride !== undefined ? capOverride : l[name];
@@ -168,8 +173,11 @@ async function quotaNotices(user, org, category, tokens) {
       const crossed = THRESHOLDS.filter((t) => before < t && now_ >= t);
       if (!crossed.length) continue;
       const t = crossed[crossed.length - 1];
-      const isCat = name.startsWith('category:');
-      const what = isCat ? `today's ${category} quota` : LABELS[name][0];
+      const isCat = name.startsWith('category');
+      const what = name.startsWith('categoryTokens:')
+        ? `today's ${category} token quota`
+        : isCat ? `today's ${category} request quota`
+          : s.level === 'org' ? `its pooled ${LABELS[name][0]}` : `your account-wide ${LABELS[name][0]}`;
       const period = isCat ? periodId.day : periodId[LABELS[name][1]];
       const who = s.level === 'org' ? 'Your organization has used' : "You've used";
       const amount = after >= cap ? 'all' : `${t}%`;
@@ -178,18 +186,70 @@ async function quotaNotices(user, org, category, tokens) {
         scope: s.level,
         level: t >= 99 ? 'critical' : t >= 90 ? 'warn' : 'info',
         percent: t,
-        text: `${who} ${amount} of ${s.level === 'org' && !isCat ? 'its pooled ' : ''}${what} (${after.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')}).`,
+        text: `${who} ${amount} of ${what} (${after.toLocaleString('en-US')} / ${cap.toLocaleString('en-US')}).`,
       });
     }
   }
   return out;
 }
 
+// --- Cost guide ------------------------------------------------------------------
+// What a single request costs, so admins can size quotas. Measured from real
+// usage (last 30 days, all users) once a category has enough samples;
+// otherwise a typical estimate.
+const TYPICAL_TOKENS = { general: 300, math: 40, text: 250, coding: 650, cyber: 500, design: 450, data: 500 };
+const MIN_SAMPLES = 5;
+let guideCache = { at: 0, value: null };
+
+async function costGuide({ maxReplyTokens, maxMessageChars, maxHistoryChars }) {
+  if (guideCache.value && Date.now() - guideCache.at < 60000) return guideCache.value;
+  const since = new Date(Date.now() - 30 * DAY_MS).toISOString().slice(0, 10);
+  const docs = await usage
+    .find({ _id: { $regex: /^u:\d+\|D:/ }, ctok: { $exists: true } }, { projection: { _id: 1, cat: 1, ctok: 1 } })
+    .toArray();
+  const totals = {};
+  for (const d of docs) {
+    if (d._id.split('|D:')[1] < since) continue;
+    for (const [cat, tok] of Object.entries(d.ctok || {})) {
+      const t = (totals[cat] = totals[cat] || { requests: 0, tokens: 0 });
+      t.tokens += tok;
+      t.requests += (d.cat || {})[cat] || 0;
+    }
+  }
+  const systemPrompt = 150; // approx. system prompt tokens sent with LLM requests
+  const worstCase = Math.ceil(maxMessageChars / 4) + Math.ceil(maxHistoryChars / 4) + maxReplyTokens + systemPrompt;
+  const categories = {};
+  for (const [cat, typical] of Object.entries(TYPICAL_TOKENS)) {
+    const t = totals[cat];
+    const observed = t && t.requests >= MIN_SAMPLES ? Math.round(t.tokens / t.requests) : null;
+    categories[cat] = {
+      avgTokens: observed !== null ? observed : typical,
+      source: observed !== null ? 'observed' : 'estimate',
+      samples: t ? t.requests : 0,
+    };
+  }
+  const value = {
+    categories,
+    localRange: [5, 60], // rules / FAQ answers
+    llmRange: [250, Math.min(maxReplyTokens + 300, 1500)], // typical model answers
+    worstCase,
+    maxReplyTokens,
+    note: 'Tokens ≈ characters ÷ 4, counted for the message, any chat history sent, and the reply.',
+  };
+  guideCache = { at: Date.now(), value };
+  return value;
+}
+
 /** Usage snapshot for display: today and this month. */
 async function summary(subjectKey) {
   const c = await countersFor(subjectKey);
-  const pick = (d) => ({ requests: d.requests || 0, tokens: d.tokens || 0, byCategory: d.cat || {} });
+  const pick = (d) => ({
+    requests: d.requests || 0,
+    tokens: d.tokens || 0,
+    byCategory: d.cat || {},
+    tokensByCategory: d.ctok || {},
+  });
   return { today: pick(c.day), month: pick(c.month) };
 }
 
-module.exports = { init, check, record, summary, quotaNotices, THRESHOLDS };
+module.exports = { init, check, record, summary, quotaNotices, costGuide, THRESHOLDS };

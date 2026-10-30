@@ -22,7 +22,7 @@ const { ACTIONS: PROTECTION_ACTIONS, DEFAULT_ACTION } = require('./protection');
 const isId = (v) => /^\d{1,9}$/.test(String(v));
 const PUBLIC_ID_RE = /^[0-9a-f]{16}$/;
 
-function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, countActiveSessions }) {
+function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide }) {
   const router = express.Router();
 
   // --- helpers ---------------------------------------------------------------
@@ -91,6 +91,11 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       orgs: await Promise.all(orgs.map(describeOrg)),
       users: await Promise.all(users.map(describeUser)),
     });
+  }));
+
+  // What a single request costs, to help size quotas.
+  router.get('/cost-guide', wrap(async (req, res) => {
+    res.json(await costGuide());
   }));
 
   router.get('/alerts', wrap(async (req, res) => {

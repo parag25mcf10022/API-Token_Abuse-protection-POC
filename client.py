@@ -462,14 +462,18 @@ def cmd_usage(client):
         print(f"  {dim(label)} {meter(used, cap)}")
     cats = d.get("categories") or []
     if cats:
+        cost = d.get("costPerRequest") or {}
         print()
-        print(f"  {bold('Category'.ljust(9))} {bold('Quota/day'.ljust(13))} {bold('Used'.ljust(6))} {bold('Status')}")
+        print(f"  {dim('Each category has its own daily quota — using one never uses up another.')}")
+        print(f"  {bold('Category'.ljust(9))} {bold('Requests'.ljust(13))} {bold('Tokens'.ljust(17))} {bold('≈tok/req'.ljust(9))} {bold('Status')}")
         for c in cats:
-            quota = "—" if not c["inPlan"] else ("shared" if c["cap"] is None else f"{c['cap']:,}")
+            req = "—" if not c["inPlan"] else f"{c['used']}/{c['cap'] if c['cap'] is not None else '∞'}"
+            tok = "—" if not c["inPlan"] else f"{c['usedTokens']:,}/{c['tokenCap']:,}" if c["tokenCap"] is not None else f"{c['usedTokens']:,}/∞"
+            per = f"~{cost[c['category']]:,}" if c["category"] in cost else "—"
             status = green("available") if c["usable"] else (dim if not c["inPlan"] else amber)(
                 safe(c["status"]).replace("_", " "))
             name = safe(c["category"]).ljust(9)
-            print(f"  {name if c['inPlan'] else dim(name)} {quota.ljust(13)} {str(c['used']).ljust(6)} {status}")
+            print(f"  {name if c['inPlan'] else dim(name)} {req.ljust(13)} {tok.ljust(17)} {per.ljust(9)} {status}")
 
 
 def cmd_model(client):

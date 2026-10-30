@@ -4,6 +4,26 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Changed (independent per-category quotas, cost guide)
+- **Quotas are per category.** Each category has its own daily request and
+  token allowance:
+  - `perCategoryRequestsPerDay` / `perCategoryTokensPerDay` as the default,
+  - `categoryRequestsPerDay` / `categoryTokensPerDay` as overrides.
+
+  Using one category no longer makes the others "used up".
+- Account-wide limits are now **opt-in** and labelled as affecting all
+  categories. New default: 100 requests and 100,000 tokens per category per
+  day, plus a burst of 30/min.
+- Policies still on the old shared-budget default are migrated automatically
+  (existing per-category caps are kept).
+- Per-category token metering, and notifications for category token quotas.
+- **Cost guide** (`GET /api/admin/cost-guide`) in the admin policy editor:
+  observed or estimated tokens per request per category, local/LLM/worst-case
+  ranges, live "what this quota buys" estimates, and a warning when the token
+  quota would run out first.
+- The user dashboard and CLI `/usage` show per-category request and token
+  quotas and the typical cost per request.
+
 ### Added (quotas, notifications, classification)
 - **Categories & quotas** on the dashboard and in CLI `/usage`: every
   category's daily quota, usage, remaining allowance, and why it's

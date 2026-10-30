@@ -12,7 +12,7 @@
 
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
-const { DEFAULT_USER_POLICY } = require('./policy');
+const { DEFAULT_USER_POLICY, LEGACY_DEFAULT_LIMITS } = require('./policy');
 const keyVault = require('./keyVault');
 
 const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017';
@@ -62,6 +62,31 @@ async function migrateMissingPolicies() {
     { policy: { $exists: false } },
     { $set: { policy: DEFAULT_USER_POLICY } }
   );
+  await migrateLegacyDefaultLimits();
+}
+
+/**
+ * The old default gave every account ONE shared daily budget, so heavy use of
+ * one category made all the others "used up". Policies still exactly on that
+ * default move to per-category quotas (existing category caps are kept).
+ */
+async function migrateLegacyDefaultLimits() {
+  const isLegacy = (l) => l && Object.entries(LEGACY_DEFAULT_LIMITS).every(([k, v]) => l[k] === v);
+  const upgrade = (l) => ({
+    ...DEFAULT_USER_POLICY.limits,
+    categoryRequestsPerDay: { ...(l.categoryRequestsPerDay || {}) },
+    categoryTokensPerDay: { ...(l.categoryTokensPerDay || {}) },
+  });
+  for (const u of await users.find({ 'policy.limits.requestsPerDay': LEGACY_DEFAULT_LIMITS.requestsPerDay }).toArray()) {
+    if (isLegacy(u.policy.limits)) {
+      await users.updateOne({ _id: u._id }, { $set: { 'policy.limits': upgrade(u.policy.limits) } });
+    }
+  }
+  for (const o of await orgs.find({ 'memberDefaults.limits.requestsPerDay': LEGACY_DEFAULT_LIMITS.requestsPerDay }).toArray()) {
+    if (isLegacy(o.memberDefaults.limits)) {
+      await orgs.updateOne({ _id: o._id }, { $set: { 'memberDefaults.limits': upgrade(o.memberDefaults.limits) } });
+    }
+  }
 }
 
 /**

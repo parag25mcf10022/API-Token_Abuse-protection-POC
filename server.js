@@ -512,6 +512,9 @@ async function main() {
         orgUsage: org ? await usage.summary(`o:${org.id}`) : null,
       }),
       notices: (user.notices || []).slice(-15).reverse(),
+      costPerRequest: Object.fromEntries(
+        Object.entries((await costGuide()).categories).map(([c, v]) => [c, v.avgTokens])
+      ),
     });
   }));
 
@@ -657,6 +660,14 @@ async function main() {
     return { ok: true, value: out };
   }
 
+  // What one request costs (tokens), per category — for sizing quotas.
+  const costGuide = () =>
+    usage.costGuide({
+      maxReplyTokens: llm.enabled() ? llm.config.maxTokens : 0,
+      maxMessageChars: security.LIMITS.message,
+      maxHistoryChars: MAX_HISTORY_CHARS,
+    });
+
   // NDJSON writer with the same <, >, & escaping as res.json (json escape).
   const ndjson = (obj) =>
     JSON.stringify(obj).replace(/[<>&]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n';
@@ -701,8 +712,16 @@ async function main() {
         await protection.trigger(user, 'limit_abuse');
       }
       res.set('Retry-After', String(quota.retryAfterSec));
+      const LIMIT_NAMES = {
+        burstPerMinute: 'requests per minute',
+        requestsPerDay: 'account-wide requests/day',
+        requestsPerMonth: 'account-wide requests/month',
+        tokensPerDay: 'account-wide tokens/day',
+        tokensPerMonth: 'account-wide tokens/month',
+      };
+      const limitName = LIMIT_NAMES[quota.limit] || quota.limit;
       return res.status(429).json({
-        error: `Usage limit reached: ${quota.limit} (${quota.max}) for your ${quota.level === 'org' ? 'organization' : 'account'}.`,
+        error: `Usage limit reached: ${limitName} (${quota.max}) for your ${quota.level === 'org' ? 'organization' : 'account'}.`,
         limit: quota.limit,
         retryAfter: quota.retryAfterSec,
       });
@@ -776,6 +795,9 @@ async function main() {
         userUsage: await usage.summary(`u:${user.id}`),
         orgUsage: org ? await usage.summary(`o:${org.id}`) : null,
       }),
+      costPerRequest: Object.fromEntries(
+        Object.entries((await costGuide()).categories).map(([c, v]) => [c, v.avgTokens])
+      ),
     });
   }));
 
@@ -794,7 +816,7 @@ async function main() {
   // =======================================================================
 
   const admin = createAdminRouter({
-    db, usage, alerts, security, wrap, sessionsCol, countActiveSessions,
+    db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide,
   });
 
   // Session-authenticated admins: super admin, or an org admin (own org only).

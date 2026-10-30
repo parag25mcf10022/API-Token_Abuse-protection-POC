@@ -6,13 +6,17 @@ const $ = (id) => document.getElementById(id);
 let state = null; // last /api/admin/overview response
 let editing = null; // { title, save(policy) }
 
+// Account-wide ceilings (opt-in; shared by all categories).
 const LIMIT_LABELS = {
   burstPerMinute: 'Burst (requests / minute)',
-  requestsPerDay: 'Requests / day',
-  requestsPerMonth: 'Requests / month',
-  tokensPerDay: 'Tokens / day',
-  tokensPerMonth: 'Tokens / month',
+  requestsPerDay: 'All categories: requests / day',
+  requestsPerMonth: 'All categories: requests / month',
+  tokensPerDay: 'All categories: tokens / day',
+  tokensPerMonth: 'All categories: tokens / month',
 };
+
+let guide = null; // /api/admin/cost-guide
+const fmtN = (n) => Number(n).toLocaleString();
 
 // Badge tone per alert type.
 const ALERT_TONES = {
@@ -69,6 +73,7 @@ function el(tag, props = {}, ...children) {
   for (const [k, v] of Object.entries(props)) {
     if (k === 'class') node.className = v;
     else if (k === 'onclick') node.onclick = v;
+    else if (k === 'dataset') Object.assign(node.dataset, v);
     else node[k] = v;
   }
   node.append(...children.filter((c) => c !== null && c !== undefined));
@@ -102,6 +107,7 @@ async function load() {
     ? 'Super admin — you can manage every organization and user.'
     : `Org admin — managing ${orgName(a.orgId)}.`;
   $('org-form').classList.toggle('hidden', a.kind !== 'super');
+  guide = (await api('/api/admin/cost-guide')).data || null;
   const alertList = (await api('/api/admin/alerts')).data.alerts || [];
   const engine = (await api('/auth/engine')).data || {};
   $('engine-line').textContent = !engine.enabled
@@ -146,8 +152,13 @@ function describePolicy(p) {
   if (!p) return 'none';
   const scopes = Array.isArray(p.scopes) ? p.scopes.join(', ') || '(none)' : 'all categories';
   const l = p.limits || {};
-  const parts = Object.keys(LIMIT_LABELS).filter((k) => Number.isInteger(l[k])).map((k) => `${LIMIT_LABELS[k]}: ${l[k]}`);
-  const cats = Object.entries(l.categoryRequestsPerDay || {}).map(([c, v]) => `${c}: ${v}/day`);
+  const parts = Object.keys(LIMIT_LABELS).filter((k) => Number.isInteger(l[k])).map((k) => `${LIMIT_LABELS[k]}: ${fmtN(l[k])}`);
+  if (Number.isInteger(l.perCategoryRequestsPerDay)) parts.unshift(`each category ${fmtN(l.perCategoryRequestsPerDay)} req/day`);
+  if (Number.isInteger(l.perCategoryTokensPerDay)) parts.unshift(`each category ${fmtN(l.perCategoryTokensPerDay)} tok/day`);
+  const cats = [
+    ...Object.entries(l.categoryRequestsPerDay || {}).map(([c, v]) => `${c}: ${fmtN(v)} req/day`),
+    ...Object.entries(l.categoryTokensPerDay || {}).map(([c, v]) => `${c}: ${fmtN(v)} tok/day`),
+  ];
   const llmText = p.llm === false ? ' LLM: blocked.' : p.llm === true ? ' LLM: allowed.' : '';
   return `Scopes: ${scopes}. Limits: ${[...parts, ...cats].join('; ') || 'unlimited'}.${llmText}`;
 }
@@ -262,14 +273,35 @@ function openEditor(title, policy, save) {
   }
   syncScopeAll();
 
-  const num = (name, value) => el('input', { type: 'number', min: 0, step: 1, name, value: Number.isInteger(value) ? value : '', placeholder: 'unlimited' });
+  const num = (name, value, ph = 'unlimited') =>
+    el('input', { type: 'number', min: 0, step: 1, name, value: Number.isInteger(value) ? value : '', placeholder: ph });
+  const form = $('editor-form');
+  for (const f of ['perCategoryRequestsPerDay', 'perCategoryTokensPerDay']) {
+    form.querySelector(`input[name=${f}]`).value = Number.isInteger(l[f]) ? l[f] : '';
+  }
   const limitList = $('limit-list');
   limitList.replaceChildren();
   for (const [k, label] of Object.entries(LIMIT_LABELS)) limitList.append(el('label', {}, label, num(k, l[k])));
+
+  // Per-category overrides with cost per request and a live estimate.
   const catList = $('cat-list');
   catList.replaceChildren();
-  const cl = l.categoryRequestsPerDay || {};
-  for (const c of cats) catList.append(el('label', {}, c, num(`cat:${c}`, cl[c])));
+  const cr = l.categoryRequestsPerDay || {};
+  const ct = l.categoryTokensPerDay || {};
+  for (const c of cats) {
+    const g = guide && guide.categories[c];
+    const cost = g ? `~${fmtN(g.avgTokens)}${g.source === 'observed' ? '' : ' (est.)'}` : '—';
+    const estimate = el('span', { class: 'muted small' });
+    catList.append(el('tr', { dataset: { cat: c } },
+      el('td', {}, c),
+      el('td', {}, cost),
+      el('td', {}, num(`cat:${c}`, cr[c], 'default')),
+      el('td', {}, num(`ctok:${c}`, ct[c], 'default')),
+      el('td', {}, estimate)));
+  }
+  renderCostGuide();
+  updateEstimates();
+  form.oninput = updateEstimates;
 
   $('editor').classList.remove('hidden');
   $('editor').scrollIntoView({ behavior: 'smooth' });
@@ -284,16 +316,61 @@ function readEditor() {
   const scopes = $('scope-all').checked
     ? null
     : [...$('scope-list').querySelectorAll('input:checked')].map((i) => i.value);
-  const limits = { categoryRequestsPerDay: {} };
+  const limits = { categoryRequestsPerDay: {}, categoryTokensPerDay: {} };
   for (const input of $('editor-form').querySelectorAll('input[type=number]')) {
     if (input.value === '') continue;
     const v = Number(input.value);
     if (input.name.startsWith('cat:')) limits.categoryRequestsPerDay[input.name.slice(4)] = v;
+    else if (input.name.startsWith('ctok:')) limits.categoryTokensPerDay[input.name.slice(5)] = v;
     else limits[input.name] = v;
   }
   const access = $('llm-access').value;
   const llm = access === 'allow' ? true : access === 'block' ? false : null;
   return { scopes, llm, limits };
+}
+
+// --- Cost guide: what one request costs, and what a quota buys ------------------
+function renderCostGuide() {
+  const box = $('cost-guide');
+  box.replaceChildren();
+  if (!guide) { box.classList.add('hidden'); return; }
+  box.classList.remove('hidden');
+  box.append(
+    el('strong', {}, 'What does one request cost? '),
+    `Answered locally (commands, product questions): ~${guide.localRange[0]}–${guide.localRange[1]} tokens. ` +
+      `Answered by the LLM: usually ~${fmtN(guide.llmRange[0])}–${fmtN(guide.llmRange[1])} tokens. ` +
+      `Worst case (longest message + full chat history + longest reply): ~${fmtN(guide.worstCase)} tokens. `,
+    el('br'),
+    el('span', { class: 'muted small' },
+      `${guide.note} Per-category averages come from real usage once a category has 5+ requests (otherwise "est."). ` +
+      'Rule of thumb: tokens/day ≈ requests/day × tokens per request × 1.25 headroom.'));
+}
+
+function updateEstimates() {
+  if (!guide) return;
+  const form = $('editor-form');
+  const val = (name) => {
+    const i = form.querySelector(`input[name="${name}"]`);
+    return i && i.value !== '' ? Number(i.value) : null;
+  };
+  const defReq = val('perCategoryRequestsPerDay');
+  const defTok = val('perCategoryTokensPerDay');
+  for (const row of $('cat-list').querySelectorAll('tr')) {
+    const c = row.dataset.cat;
+    const avg = guide.categories[c].avgTokens;
+    const req = val(`cat:${c}`) ?? defReq;
+    const tok = val(`ctok:${c}`) ?? defTok;
+    const out = row.lastChild.firstChild;
+    if (req === null && tok === null) { out.textContent = 'unlimited'; continue; }
+    const parts = [];
+    if (tok !== null) parts.push(`${fmtN(tok)} tokens ≈ ${fmtN(Math.floor(tok / Math.max(1, avg)))} requests`);
+    if (req !== null) {
+      const need = Math.ceil(req * avg * 1.25);
+      parts.push(`${fmtN(req)} requests need ≈ ${fmtN(need)} tokens`);
+      if (tok !== null && tok < need) parts.push('⚠ token quota will run out first');
+    }
+    out.textContent = parts.join(' · ');
+  }
 }
 
 $('scope-all').onchange = syncScopeAll;

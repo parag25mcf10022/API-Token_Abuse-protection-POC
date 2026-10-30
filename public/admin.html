@@ -81,7 +81,7 @@
     <!-- POLICY EDITOR -->
     <section id="editor" class="card hidden">
       <h2 id="editor-title"></h2>
-      <p class="muted small">Leave a limit blank for no limit at this level. User and org limits both apply — the stricter wins.</p>
+      <p class="muted small">Leave a limit blank for no limit. User and organization limits both apply — the stricter wins.</p>
       <form id="editor-form">
         <fieldset>
           <legend>Allowed content categories (scopes)</legend>
@@ -96,13 +96,28 @@
             <option value="block">Block the LLM — local engine only</option>
           </select>
         </fieldset>
+        <div id="cost-guide" class="callout"></div>
         <fieldset>
-          <legend>Usage limits</legend>
-          <div id="limit-list" class="grid2"></div>
+          <legend>Daily quota per category — each category is separate</legend>
+          <p class="muted small">Applies to every category on its own: using one category never uses up another.</p>
+          <div class="grid2">
+            <label>Requests / day, each category <input type="number" min="0" step="1" name="perCategoryRequestsPerDay" placeholder="unlimited" /></label>
+            <label>Tokens / day, each category <input type="number" min="0" step="1" name="perCategoryTokensPerDay" placeholder="unlimited" /></label>
+          </div>
         </fieldset>
         <fieldset>
-          <legend>Per-category requests per day</legend>
-          <div id="cat-list" class="grid2"></div>
+          <legend>Per-category overrides (optional)</legend>
+          <div class="table-wrap">
+            <table class="quota-table">
+              <thead><tr><th>Category</th><th>≈ tokens / request</th><th>Requests / day</th><th>Tokens / day</th><th>Estimate</th></tr></thead>
+              <tbody id="cat-list"></tbody>
+            </table>
+          </div>
+        </fieldset>
+        <fieldset>
+          <legend>Account-wide ceilings (optional) — these affect ALL categories</legend>
+          <p class="muted small">Leave blank unless you want one shared cap on top of the per-category quotas. Burst limits requests per minute (abuse protection).</p>
+          <div id="limit-list" class="grid2"></div>
         </fieldset>
         <div class="row">
           <button type="submit" class="primary">Save policy</button>
