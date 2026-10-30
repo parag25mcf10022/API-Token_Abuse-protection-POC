@@ -5,7 +5,7 @@
  *   unapproved_device_use — repeated /api/message attempts from devices the
  *                           owner never approved (the real CLI waits for
  *                           approval, so this looks like a stolen key)
- *   device_spray          — several new devices in 24 h (key spreading)
+ *   device_spray          — several new unapproved devices in 24 h (key spreading)
  *   reveal_lockout        — wrong passwords while viewing the key (hijacked
  *                           session)
  *   limit_abuse           — many limit-blocked requests in a day
@@ -26,7 +26,7 @@ const DEFAULT_ACTION = 'disable';
 
 const THRESHOLDS = {
   unapproved_device_use: 3, // message attempts from unapproved devices per day
-  device_spray: 3, // new devices per 24 h
+  device_spray: 3, // new, still-unapproved devices per 24 h
   limit_abuse: 50, // limit-blocked requests per day
 };
 

@@ -8,7 +8,7 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 - Keys are **automatically disabled or rotated** when they look compromised
   or abused:
   - repeated use from unapproved devices (3 per day),
-  - 3+ new devices in 24 hours,
+  - 3+ new unapproved devices in 24 hours,
   - a lockout while viewing the key,
   - 50+ limit-blocked requests in a day.
 - The action (`alert` | `disable` | `rotate`, default `disable`) is set per

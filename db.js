@@ -396,9 +396,13 @@ function setProtection(userId, action) {
   return users.updateOne({ id: Number(userId) }, { $set: { protection: { action } } });
 }
 
-/** New devices registered for a user since `since` (device-spray signal). */
+/**
+ * Unapproved devices registered for a user since `since` (device-spray
+ * signal). Devices the owner approved don't count, so setting up several of
+ * your own machines in a day is fine.
+ */
 function countDevicesSince(userId, since) {
-  return devices.countDocuments({ userId, createdAt: { $gt: since } });
+  return devices.countDocuments({ userId, status: 'pending', createdAt: { $gt: since } });
 }
 
 function setUserPolicy(userId, policy) {

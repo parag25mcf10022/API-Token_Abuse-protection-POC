@@ -6,6 +6,7 @@
  *
  *   {
  *     scopes: ['math', 'text', ...] | null,   // null = no restriction at this level
+ *     llm: true | false | null,               // may this key use the LLM? (cost control)
  *     limits: {
  *       burstPerMinute, requestsPerDay, requestsPerMonth,
  *       tokensPerDay, tokensPerMonth,         // ≈ characters / 4
@@ -43,6 +44,7 @@ const MAX_LIMIT = 1e9;
 // What a brand-new personal account gets until an admin changes it.
 const DEFAULT_USER_POLICY = Object.freeze({
   scopes: ['general', 'math', 'text'],
+  llm: true,
   limits: {
     burstPerMinute: 30,
     requestsPerDay: 500,
@@ -70,7 +72,11 @@ function validatePolicy(input) {
   if (!input || typeof input !== 'object' || Array.isArray(input)) {
     return { ok: false, error: 'Policy must be an object.' };
   }
-  const out = { scopes: null, limits: { categoryRequestsPerDay: {} } };
+  const out = { scopes: null, llm: null, limits: { categoryRequestsPerDay: {} } };
+  if (input.llm !== undefined && input.llm !== null) {
+    if (typeof input.llm !== 'boolean') return { ok: false, error: 'llm must be true, false, or null.' };
+    out.llm = input.llm;
+  }
 
   if (input.scopes !== undefined && input.scopes !== null) {
     if (!Array.isArray(input.scopes) || input.scopes.some((s) => !CATEGORY_NAMES.includes(s))) {
@@ -113,7 +119,13 @@ function allowedScopes(userPolicy, orgPolicy) {
   return allowed;
 }
 
+/** LLM access needs both the user and org policy to allow it (null = inherit/allow). */
+function llmAllowed(userPolicy, orgPolicy) {
+  return [userPolicy, orgPolicy].every((p) => !p || p.llm !== false);
+}
+
 module.exports = {
+  llmAllowed,
   CATEGORIES,
   CATEGORY_NAMES,
   LIMIT_FIELDS,

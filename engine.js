@@ -10,8 +10,9 @@
  *      is configured do we fall back to the LLM — and that answer is cached
  *      too, so a given question costs the LLM at most once.
  *
- * Default: local-only. No LLM, no model, no external calls.
- * Opt in by passing an `llmFallback` async fn (see server.js / README).
+ * With an LLM provider (llm.js, local Ollama by default), questions the
+ * local engine can't answer are streamed from the model; rules and product
+ * questions always stay local.
  */
 
 'use strict';
@@ -270,10 +271,17 @@ function faqMatch(norm, entries = FAQ, minHits = 2) {
 
 /**
  * Generate a reply.
+ *
+ * Order: cache → deterministic rules → product FAQ (all local, instant) →
+ * LLM (if allowed and available; streamed) → local category tips → fallback.
+ *
  * @param {string} message
  * @param {object} [opts]
- * @param {function(string):Promise<string>} [opts.llmFallback] optional async LLM
- * @returns {Promise<{reply:string, source:string}>}
+ * @param {object} [opts.llm]       provider with chat({category, history, message, onDelta})
+ * @param {string} [opts.category]  content category (from classify)
+ * @param {Array}  [opts.history]   prior turns [{role, content}] for multi-turn chat
+ * @param {function(string)} [opts.onDelta] receives streamed text
+ * @returns {Promise<{reply, source, model?, usage?}>}
  *   source ∈ "rule" | "faq" | "cache" | "llm" | "fallback"
  */
 async function generate(message, opts = {}) {
@@ -281,10 +289,16 @@ async function generate(message, opts = {}) {
   if (!raw) return { reply: 'Say something and I will respond.', source: 'fallback' };
 
   const norm = normalize(raw);
+  const history = Array.isArray(opts.history) ? opts.history : [];
+  // Conversation context changes the answer, so only single-turn requests
+  // read from / write to the shared cache.
+  const cacheable = history.length === 0;
 
   // 1. cache (covers both prior local + prior LLM answers)
-  const cached = cacheGet(norm);
-  if (cached) return { reply: cached.reply, source: 'cache' };
+  if (cacheable) {
+    const cached = cacheGet(norm);
+    if (cached) return { reply: cached.reply, source: 'cache' };
+  }
 
   // 2. local rules (cheap, deterministic)
   for (const rule of RULES) {
@@ -296,29 +310,38 @@ async function generate(message, opts = {}) {
     }
   }
 
-  // 3. local FAQ retrieval
-  const faq = faqMatch(norm, FAQ) || faqMatch(norm, CATEGORY_KB, 1);
+  // 3. questions about this service — answered locally, always accurate
+  const faq = faqMatch(norm, FAQ);
   if (faq) {
     cacheSet(norm, { reply: faq.answer, source: 'faq' });
     return { reply: faq.answer, source: 'faq' };
   }
 
-  // 4. low confidence → optional LLM fallback (only if configured), cached
-  if (typeof opts.llmFallback === 'function') {
+  // 4. LLM (streamed). Falls through to local answers on any failure.
+  if (opts.llm) {
     try {
-      const reply = await opts.llmFallback(raw);
-      if (reply) {
-        cacheSet(norm, { reply, source: 'llm' });
-        return { reply, source: 'llm' };
-      }
+      const out = await opts.llm.chat({
+        category: opts.category || classify(raw),
+        history,
+        message: raw,
+        onDelta: opts.onDelta,
+      });
+      if (cacheable) cacheSet(norm, { reply: out.reply, source: 'llm' });
+      return { reply: out.reply, source: 'llm', model: out.model, usage: out.usage };
     } catch (e) {
-      // fall through to local fallback on any LLM error
+      // LLM down/slow → local tips or fallback below
     }
   }
 
-  // 5. cheap reflective fallback — no LLM needed
+  // 5. local category tips (coding / cyber / design / data)
+  const tip = faqMatch(norm, CATEGORY_KB, 1);
+  if (tip) {
+    if (cacheable) cacheSet(norm, { reply: tip.answer, source: 'faq' });
+    return { reply: tip.answer, source: 'faq' };
+  }
+
+  // 6. cheap reflective fallback
   const reply = `I don't have a canned answer for that. You said: "${raw}". Type "help" for what I can do.`;
-  cacheSet(norm, { reply, source: 'fallback' });
   return { reply, source: 'fallback' };
 }
 

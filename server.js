@@ -23,6 +23,7 @@ const MongoStore = require('connect-mongo').default;
 const db = require('./db');
 const engine = require('./engine');
 const security = require('./security');
+const llm = require('./llm');
 const { createLimiter, limit, tooMany } = require('./rateLimit');
 const usage = require('./usage');
 const alerts = require('./alerts');
@@ -30,12 +31,6 @@ const policyLib = require('./policy');
 const { createAdminRouter } = require('./adminRoutes');
 const { createProtection, ACTIONS: PROTECTION_ACTIONS } = require('./protection');
 
-// Optional LLM fallback for messages the local engine can't confidently
-// answer. Disabled unless you wire one up (kept null here so the demo makes
-// ZERO model calls by default). See README for how to plug in Claude with
-// prompt caching. Results are cached by the engine, so the LLM is hit at most
-// once per unique message.
-const llmFallback = null;
 
 const PORT = process.env.PORT || 3000;
 
@@ -518,41 +513,37 @@ async function main() {
   // API SERVER — the account-bound, protected endpoint
   // =======================================================================
 
-  app.post('/api/message', limit(limits.messageIp, byIp), wrap(async (req, res) => {
-    const api_key = readApiKey(req, res);
-    if (api_key === null) return;
+  /**
+   * Shared checks for every key-authenticated call (steps 1–5 of the AAP
+   * order): key format + owner, admin-enabled, not auto-locked, approved
+   * device, live owner session. Sends the error response and returns null on
+   * failure; returns the user on success.
+   */
+  async function authenticateKey(req, res) {
+    const apiKey = readApiKey(req, res);
+    if (apiKey === null) return null;
     const deviceToken = readDeviceToken(req, res);
-    if (deviceToken === null) return;
-    const { message } = req.body || {};
-    if (message === undefined) {
-      return res.status(400).json({ error: 'message is required.' });
-    }
-    const msg = security.cleanText(message, 'message', security.LIMITS.message);
-    if (!msg.ok) {
-      return res.status(400).json({ error: msg.error });
-    }
+    if (deviceToken === null) return null;
 
     // 1. Which user owns this key? Only well-formed key strings reach the
     // DB — an object like {"$ne": null} would act as a MongoDB operator.
-    const user = security.isApiKey(api_key)
-      ? await db.getUserByApiKey(api_key)
-      : null;
+    const user = security.isApiKey(apiKey) ? await db.getUserByApiKey(apiKey) : null;
     if (!user) {
-      return res.status(401).json({ error: 'Unauthorized: invalid API key' });
+      res.status(401).json({ error: 'Unauthorized: invalid API key' });
+      return null;
     }
-
     // 2. Has an admin disabled this key?
     if (!user.keyEnabled) {
-      return res.status(403).json({ error: 'Forbidden: API key is disabled' });
+      res.status(403).json({ error: 'Forbidden: API key is disabled' });
+      return null;
     }
-
-    // Locked automatically after suspected compromise/abuse?
+    // 3. Locked automatically after suspected compromise/abuse?
     if (user.keyLock) {
-      return res.status(403).json({ error: 'Forbidden: key locked after suspected compromise' });
+      res.status(403).json({ error: 'Forbidden: key locked after suspected compromise' });
+      return null;
     }
-
-    // Is the key being used from a device its owner approved? Repeated
-    // attempts from unapproved devices look like a stolen key.
+    // 4. Approved device? Repeated attempts from unapproved devices look like
+    // a stolen key.
     if (!(await deviceApproved(user, deviceToken, req))) {
       const tries = await alerts.raise('unapproved_device_use', user, {
         detail: 'API call from a device the owner has not approved.',
@@ -562,20 +553,59 @@ async function main() {
       if (protection.crossed('unapproved_device_use', tries)) {
         await protection.trigger(user, 'unapproved_device_use', { ip: req.ip });
       }
-      return res.status(403).json({
-        error: 'Forbidden: this device is not approved. Approve it on your dashboard.',
-      });
+      res.status(403).json({ error: 'Forbidden: this device is not approved. Approve it on your dashboard.' });
+      return null;
     }
-
-    // 3. THE AAP CHECK — is the owner's browser session active right now?
-    const active = await userHasActiveSession(user.id);
-    if (!active) {
-      return res
-        .status(401)
-        .json({ error: 'Unauthorized: No active session found' });
+    // 5. THE AAP CHECK — is the owner's browser session active right now?
+    if (!(await userHasActiveSession(user.id))) {
+      res.status(401).json({ error: 'Unauthorized: No active session found' });
+      return null;
     }
+    return user;
+  }
 
-    // 4. Scope: is this key allowed to use this content category?
+  /** Validate optional chat history: [{role: 'user'|'assistant', content}] */
+  const MAX_HISTORY_TURNS = 12;
+  const MAX_HISTORY_CHARS = 16000;
+  function readHistory(input) {
+    if (input === undefined || input === null) return { ok: true, value: [] };
+    if (!Array.isArray(input) || input.length > MAX_HISTORY_TURNS) {
+      return { ok: false, error: `history must be an array of at most ${MAX_HISTORY_TURNS} turns.` };
+    }
+    const out = [];
+    let total = 0;
+    for (const turn of input) {
+      if (!turn || !['user', 'assistant'].includes(turn.role)) {
+        return { ok: false, error: "history roles must be 'user' or 'assistant'." };
+      }
+      const c = security.cleanText(turn.content, 'history content', 8000);
+      if (!c.ok) return { ok: false, error: c.error };
+      total += c.value.length;
+      out.push({ role: turn.role, content: c.value });
+    }
+    if (total > MAX_HISTORY_CHARS) return { ok: false, error: 'history is too long.' };
+    return { ok: true, value: out };
+  }
+
+  // NDJSON writer with the same <, >, & escaping as res.json (json escape).
+  const ndjson = (obj) =>
+    JSON.stringify(obj).replace(/[<>&]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`) + '\n';
+
+  app.post('/api/message', limit(limits.messageIp, byIp), wrap(async (req, res) => {
+    const { message, stream } = req.body || {};
+    if (message === undefined) {
+      return res.status(400).json({ error: 'message is required.' });
+    }
+    const msg = security.cleanText(message, 'message', security.LIMITS.message);
+    if (!msg.ok) return res.status(400).json({ error: msg.error });
+    const hist = readHistory((req.body || {}).history);
+    if (!hist.ok) return res.status(400).json({ error: hist.error });
+
+    // Steps 1–5: key, enabled, lock, device, live session.
+    const user = await authenticateKey(req, res);
+    if (!user) return;
+
+    // 6. Scope: is this key allowed to use this content category?
     const org = await db.getOrg(user.orgId);
     const category = engine.classify(msg.value);
     if (!policyLib.allowedScopes(user.policy, org && org.policy).includes(category)) {
@@ -585,8 +615,10 @@ async function main() {
       });
     }
 
-    // 5. Usage limits (user + org pool), configured by admins only.
-    const est = policyLib.estimateTokens(msg.value);
+    // 7. Usage limits (user + org pool), configured by admins only. The
+    // estimate includes conversation history, which is sent to the model.
+    const historyText = hist.value.map((h) => h.content).join(' ');
+    const est = policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(historyText);
     const quota = await usage.check(user, org, category, est);
     if (!quota.ok) {
       const hits = await alerts.raise('limit_exceeded', user, {
@@ -604,19 +636,68 @@ async function main() {
       });
     }
 
-    // 6. All checks passed → run the engine and meter the usage.
-    const { reply, source } = await engine.generate(msg.value, {
-      llmFallback: llmFallback || undefined,
+    // 8. All checks passed → run the engine (LLM only if policy allows it).
+    const useLlm = llm.enabled() && policyLib.llmAllowed(user.policy, org && org.policy);
+    const started = Date.now();
+    const streaming = stream === true;
+    if (streaming) {
+      res.status(200);
+      res.set('Content-Type', 'application/x-ndjson; charset=utf-8');
+      res.set('X-Accel-Buffering', 'no');
+      res.flushHeaders();
+    }
+    const out = await engine.generate(msg.value, {
+      llm: useLlm ? llm : null,
+      category,
+      history: hist.value,
+      onDelta: streaming ? (text) => res.write(ndjson({ type: 'delta', text })) : undefined,
     });
-    const tokens = policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(reply);
+
+    // Meter real model token counts when the LLM answered, else an estimate.
+    const tokens = out.usage
+      ? out.usage.input + out.usage.output
+      : est + policyLib.estimateTokens(out.reply);
     await usage.record(user, org, category, tokens);
-    res.json({
-      reply,
-      source, // "rule" | "faq" | "cache" | "llm" | "fallback" — handy for the demo
+
+    const meta = {
+      source: out.source, // "rule" | "faq" | "cache" | "llm" | "fallback"
       category,
       tokens,
+      model: out.model || null,
+      ms: Date.now() - started,
       processedAt: new Date().toISOString(),
+    };
+    if (streaming) {
+      // Non-LLM answers arrive in one piece.
+      if (out.source !== 'llm') res.write(ndjson({ type: 'delta', text: out.reply }));
+      res.end(ndjson({ type: 'done', ...meta }));
+    } else {
+      res.json({ reply: out.reply, ...meta });
+    }
+  }));
+
+  // Key-authenticated account summary for the CLI (/usage).
+  app.get('/api/usage', limit(limits.statusIp, byIp), wrap(async (req, res) => {
+    const user = await authenticateKey(req, res);
+    if (!user) return;
+    const org = await db.getOrg(user.orgId);
+    res.json({
+      org: org ? { name: org.name, role: user.orgRole } : null,
+      scopes: policyLib.allowedScopes(user.policy, org && org.policy),
+      llm: llm.enabled() && policyLib.llmAllowed(user.policy, org && org.policy),
+      limits: (user.policy && user.policy.limits) || {},
+      usage: await usage.summary(`u:${user.id}`),
     });
+  }));
+
+  // Engine status (provider/model) for the CLI and dashboard. No secrets.
+  app.get('/api/engine', limit(limits.statusIp, byIp), wrap(async (req, res) => {
+    const user = await authenticateKey(req, res);
+    if (!user) return;
+    res.json(await llm.status());
+  }));
+  app.get('/auth/engine', requireLogin, wrap(async (req, res) => {
+    res.json(await llm.status());
   }));
 
   // =======================================================================
