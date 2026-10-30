@@ -46,18 +46,34 @@
       const { users } = await res.json();
       const tbody = $('users');
       tbody.innerHTML = '';
+      // Build rows with DOM APIs + textContent so user-controlled values
+      // (e.g. email) can never be interpreted as HTML.
+      const badge = (on, text) => {
+        const s = document.createElement('span');
+        s.className = 'badge ' + (on ? 'on' : 'off');
+        s.textContent = text;
+        return s;
+      };
+      const cell = (...children) => {
+        const td = document.createElement('td');
+        td.append(...children);
+        return td;
+      };
       for (const u of users) {
         const tr = document.createElement('tr');
-        tr.innerHTML = `
-          <td>${u.email}${u.isAdmin ? ' <span class="badge on">admin</span>' : ''}</td>
-          <td>${u.hasActiveSession
-            ? '<span class="badge on">active</span>'
-            : '<span class="badge off">none</span>'}</td>
-          <td>${u.keyEnabled
-            ? '<span class="badge on">enabled</span>'
-            : '<span class="badge off">disabled</span>'}</td>
-          <td><button class="ghost small" data-id="${u.id}" data-next="${!u.keyEnabled}">
-            ${u.keyEnabled ? 'Disable' : 'Enable'}</button></td>`;
+        const emailCell = cell(String(u.email));
+        if (u.isAdmin) emailCell.append(' ', badge(true, 'admin'));
+        const btn = document.createElement('button');
+        btn.className = 'ghost small';
+        btn.dataset.id = u.id;
+        btn.dataset.next = String(!u.keyEnabled);
+        btn.textContent = u.keyEnabled ? 'Disable' : 'Enable';
+        tr.append(
+          emailCell,
+          cell(u.hasActiveSession ? badge(true, 'active') : badge(false, 'none')),
+          cell(u.keyEnabled ? badge(true, 'enabled') : badge(false, 'disabled')),
+          cell(btn)
+        );
         tbody.appendChild(tr);
       }
       tbody.querySelectorAll('button').forEach((btn) => {

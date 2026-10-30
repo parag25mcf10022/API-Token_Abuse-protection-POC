@@ -45,8 +45,9 @@ in **MongoDB Compass**:
   - **`sessions`** — written by `connect-mongo`; each doc's `session.userId` is the account binding. Log in/out and watch docs appear/disappear.
   - **`counters`** — auto-increment source for the numeric user `id`
 
-The AAP check (`userHasActiveSession`) queries the `sessions` collection via the
-store's `.all()` method — exactly the state you can see in Compass.
+The AAP check (`userHasActiveSession`) runs an indexed query on the `sessions`
+collection (`session.userId` + unexpired `expires`) — exactly the state you can
+see in Compass.
 
 Override the connection with env vars if needed:
 `MONGO_URL=mongodb://host:27017 MONGO_DB=AAP npm start`.
@@ -165,9 +166,10 @@ misses reach the LLM and every answer is cached, model usage stays minimal.
 ## How the binding works
 
 `server.js` uses `connect-mongo` as the session store (collection `sessions`
-in the `AAP` database) and calls its `.all()` method to enumerate live
-sessions. `userHasActiveSession(userId)` scans them for one belonging to the
-key's owner. Because the store is queryable server-side — and persisted in
+in the `AAP` database) with `stringify: false`, so each session is stored as a
+real sub-document. `userHasActiveSession(userId)` does a single indexed
+`findOne` on `session.userId` (ignoring expired sessions) to see whether the
+key's owner is logged in. Because the store is queryable server-side — and persisted in
 MongoDB — the API server can answer "is this account logged in?" for any key,
 independent of who is calling, and the state survives restarts.
 
@@ -176,6 +178,10 @@ independent of who is calling, and the state survives restarts.
 - Passwords are hashed with `scrypt` + per-user salt (`db.js`).
 - Session cookie is `HttpOnly` + `SameSite=Lax`, 30-minute expiry.
 - `session-status` returns only a boolean and a masked email — never the key.
+- `api_key` (and other inputs) must be strings, so MongoDB query operators like
+  `{"$ne": null}` can't be injected to match someone else's key.
+- The session ID is regenerated on login/signup (no session fixation).
+- The admin panel renders user data via `textContent`, never `innerHTML`.
 - This is a **demo**: it uses an unauthenticated local MongoDB, a hard-coded
   session secret, and HTTP. For production: secured MongoDB (auth + TLS),
   env-provided secret, HTTPS, rate limiting, and CSRF protection on the auth
