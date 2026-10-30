@@ -30,9 +30,32 @@ async function connect() {
   users = db.collection('users');
   counters = db.collection('counters');
   await users.createIndex({ email: 1 }, { unique: true });
-  await users.createIndex({ apiKey: 1 }, { unique: true });
   await users.createIndex({ id: 1 }, { unique: true });
+  await migratePlaintextKeys();
+  await users.createIndex({ apiKeyHash: 1 }, { unique: true });
   return db;
+}
+
+/**
+ * One-time migration: older versions stored API keys in plaintext (`apiKey`).
+ * Replace them with a hash + display prefix. Existing keys keep working.
+ */
+async function migratePlaintextKeys() {
+  const legacy = await users.find({ apiKey: { $exists: true } }).toArray();
+  if (!legacy.length) return;
+  // The old unique index on `apiKey` would reject unsetting the field on more
+  // than one document (missing values index as null), so drop it first.
+  await users.dropIndex('apiKey_1').catch(() => {});
+  for (const u of legacy) {
+    await users.updateOne(
+      { _id: u._id },
+      {
+        $set: { apiKeyHash: hashApiKey(u.apiKey), apiKeyPrefix: keyPrefix(u.apiKey) },
+        $unset: { apiKey: '' },
+      }
+    );
+  }
+  console.log(`Migrated ${legacy.length} plaintext API key(s) to hashed storage.`);
 }
 
 /** The live MongoClient — connect-mongo reuses this so everything lands in "AAP". */
@@ -83,9 +106,23 @@ function verifyPassword(password, stored) {
     crypto.timingSafeEqual(candidate, expected);
 }
 
-/** Generate a fresh API key. */
+/** Generate a fresh API key (plaintext — shown to the owner once, never stored). */
 function generateApiKey() {
   return 'ak_' + crypto.randomBytes(24).toString('hex');
+}
+
+/**
+ * Keys are stored only as SHA-256 hashes. They're 192-bit random values, so a
+ * fast hash is sufficient (no salt/slow KDF needed — they can't be guessed).
+ * A DB leak therefore doesn't reveal usable keys.
+ */
+function hashApiKey(apiKey) {
+  return crypto.createHash('sha256').update(apiKey).digest('hex');
+}
+
+/** Non-secret display prefix, e.g. "ak_1a2b3c4", so users can tell keys apart. */
+function keyPrefix(apiKey) {
+  return apiKey.slice(0, 10);
 }
 
 /** Atomically grab the next numeric user id. */
@@ -106,11 +143,13 @@ async function createUser(email, password, { isAdmin = false, keyEnabled = false
     throw new Error('Could not create an account with those details.');
   }
   const id = await nextId();
+  const apiKey = generateApiKey();
   const user = {
     id,
     email,
     passwordHash: hashPassword(password),
-    apiKey: generateApiKey(),
+    apiKeyHash: hashApiKey(apiKey),
+    apiKeyPrefix: keyPrefix(apiKey),
     keyEnabled: !!keyEnabled, // admin toggles this on/off
     isAdmin,
     createdAt: new Date().toISOString(),
@@ -123,7 +162,8 @@ async function createUser(email, password, { isAdmin = false, keyEnabled = false
     }
     throw e;
   }
-  return user;
+  // Plaintext key is returned to the caller once (for display) — not stored.
+  return { ...user, apiKey };
 }
 
 function getUserById(id) {
@@ -135,7 +175,22 @@ function getUserByEmail(email) {
 }
 
 function getUserByApiKey(apiKey) {
-  return users.findOne({ apiKey });
+  return users.findOne({ apiKeyHash: hashApiKey(apiKey) });
+}
+
+/**
+ * Replace a user's API key. The old key stops working immediately. Returns
+ * the new plaintext key (the only time it is available). Approval state
+ * (keyEnabled) is kept, so rotating can't bypass an admin's decision.
+ */
+async function rotateApiKey(userId) {
+  const apiKey = generateApiKey();
+  const r = await users.updateOne(
+    { id: Number(userId) },
+    { $set: { apiKeyHash: hashApiKey(apiKey), apiKeyPrefix: keyPrefix(apiKey) } }
+  );
+  if (!r.matchedCount) throw new Error('User not found');
+  return apiKey;
 }
 
 function listUsers() {
@@ -176,5 +231,5 @@ module.exports = {
   setPassword,
   verifyPassword,
   DUMMY_HASH,
-  generateApiKey,
+  rotateApiKey,
 };

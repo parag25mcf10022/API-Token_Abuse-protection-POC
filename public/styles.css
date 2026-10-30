@@ -91,6 +91,9 @@ button { font-family: inherit; }
 .ghost.small { padding: 6px 10px; font-size: 0.8rem; }
 
 .error { color: var(--bad); font-size: 0.85rem; min-height: 1em; margin: 0; }
+.warn { color: var(--bad); font-weight: 600; margin: 8px 0 0; }
+#rotate-form { margin-top: 12px; }
+#rotate-form input { flex: 1; margin: 0; }
 .hint { color: var(--muted); font-size: 0.8rem; text-align: center; margin-top: 18px; line-height: 1.6; }
 code { background: #eeeeee; padding: 2px 6px; border-radius: 3px; font-size: 0.85em; color: var(--ink); }
 

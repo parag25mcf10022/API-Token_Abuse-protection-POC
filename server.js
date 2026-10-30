@@ -214,6 +214,7 @@ async function main() {
       return res.status(409).json({ error: e.message });
     }
     await startSession(req, user.id);
+    // The plaintext key is returned exactly once, here. Only its hash is stored.
     res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin });
   }));
 
@@ -239,7 +240,7 @@ async function main() {
     }
     limits.loginFail.reset(failKey);
     await startSession(req, user.id);
-    res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin });
+    res.json({ email: user.email, isAdmin: user.isAdmin });
   }));
 
   app.post('/auth/logout', (req, res) => {
@@ -267,11 +268,30 @@ async function main() {
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     res.json({
       email: user.email,
-      apiKey: user.apiKey,
+      apiKeyPrefix: user.apiKeyPrefix, // full key is never shown again
       keyEnabled: user.keyEnabled,
       isAdmin: user.isAdmin,
       activeSessions: await countActiveSessions(user.id),
     });
+  }));
+
+  // Replace a leaked/lost key. Requires the current password so a hijacked
+  // session alone can't mint a key; failures share the login lockout.
+  app.post('/auth/rotate-key', requireLogin, wrap(async (req, res) => {
+    const { password } = req.body || {};
+    const failKey = `rotate|${req.session.userId}`;
+    const lock = limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+      limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    limits.loginFail.reset(failKey);
+    const apiKey = await db.rotateApiKey(user.id);
+    res.json({ apiKey, keyEnabled: user.keyEnabled });
   }));
 
   // =======================================================================
@@ -366,7 +386,7 @@ async function main() {
       out.push({
         id: u.id,
         email: u.email,
-        apiKey: u.apiKey,
+        apiKeyPrefix: u.apiKeyPrefix, // admins never see full keys
         keyEnabled: u.keyEnabled,
         isAdmin: u.isAdmin,
         hasActiveSession: await userHasActiveSession(u.id),
