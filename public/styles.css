@@ -142,3 +142,10 @@ th { color: var(--muted); font-weight: 600; }
 .wrap.wide {
   max-width: 760px;
 }
+
+.devices {
+  margin: 22px 0;
+}
+.devices table {
+  width: 100%;
+}

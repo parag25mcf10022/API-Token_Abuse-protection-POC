@@ -203,6 +203,35 @@ async function main() {
     return key;
   }
 
+  const DEVICE_TOKEN_RE = /^[0-9a-f]{64}$/;
+
+  /** Read + validate the CLI's device token header; sends 400 and returns null if bad. */
+  function readDeviceToken(req, res) {
+    const token = req.get('X-AAP-Device');
+    if (typeof token !== 'string' || !DEVICE_TOKEN_RE.test(token)) {
+      res.status(400).json({ error: 'X-AAP-Device header required (64 hex chars).' });
+      return null;
+    }
+    return token;
+  }
+
+  /**
+   * Is this device approved by the key's owner? Unknown devices are recorded
+   * as "pending" so the owner sees them on the dashboard (and learns their key
+   * is being used somewhere new).
+   */
+  async function deviceApproved(user, token, req) {
+    const device = await db.getDevice(user.id, token);
+    if (!device) {
+      const n = security.cleanText(req.get('X-AAP-Device-Name') || '', 'name', 64);
+      await db.registerPendingDevice(user.id, token, n.ok ? n.value.trim() : 'unnamed device');
+      return false;
+    }
+    if (device.status !== 'approved') return false;
+    await db.touchDevice(device._id);
+    return true;
+  }
+
   // Auth/API responses can carry keys or account state — never cache them.
   app.use(['/auth', '/api'], (req, res, next) => {
     res.set('Cache-Control', 'no-store');
@@ -278,6 +307,26 @@ async function main() {
     res.json({ ok: true, sessionsEnded: deletedCount });
   }));
 
+  // --- Device management (owner only, scoped to the session's user) -------
+  const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
+
+  app.get('/auth/devices', requireLogin, wrap(async (req, res) => {
+    res.json({ devices: await db.listDevices(req.session.userId) });
+  }));
+
+  app.post('/auth/devices/:action', requireLogin, wrap(async (req, res) => {
+    const { id } = req.body || {};
+    if (typeof id !== 'string' || !DEVICE_ID_RE.test(id)) {
+      return res.status(400).json({ error: 'Valid device id required.' });
+    }
+    let ok;
+    if (req.params.action === 'approve') ok = await db.approveDevice(req.session.userId, id);
+    else if (req.params.action === 'remove') ok = await db.removeDevice(req.session.userId, id);
+    else return res.status(404).json({ error: 'Unknown action.' });
+    if (!ok) return res.status(404).json({ error: 'Device not found.' });
+    res.json({ ok: true });
+  }));
+
   // Used by the dashboard to load the current user's info.
   app.get('/auth/me', requireLogin, wrap(async (req, res) => {
     const user = await db.getUserById(req.session.userId);
@@ -321,6 +370,8 @@ async function main() {
   app.get('/auth/session-status', limit(limits.statusIp, byIp), wrap(async (req, res) => {
     const apiKey = readApiKey(req, res);
     if (apiKey === null) return;
+    const deviceToken = readDeviceToken(req, res);
+    if (deviceToken === null) return;
     if (!security.isApiKey(apiKey)) {
       // Same answer as an unknown key — don't reveal what's malformed.
       return res.json({ active: false });
@@ -330,7 +381,10 @@ async function main() {
       // Don't leak whether a key exists; just report "no session".
       return res.json({ active: false });
     }
-    const active = user.keyEnabled && (await userHasActiveSession(user.id));
+    const active =
+      user.keyEnabled &&
+      (await deviceApproved(user, deviceToken, req)) &&
+      (await userHasActiveSession(user.id));
     res.json({ active });
   }));
 
@@ -341,6 +395,8 @@ async function main() {
   app.post('/api/message', limit(limits.messageIp, byIp), wrap(async (req, res) => {
     const api_key = readApiKey(req, res);
     if (api_key === null) return;
+    const deviceToken = readDeviceToken(req, res);
+    if (deviceToken === null) return;
     const { message } = req.body || {};
     if (message === undefined) {
       return res.status(400).json({ error: 'message is required.' });
@@ -362,6 +418,13 @@ async function main() {
     // 2. Has an admin disabled this key?
     if (!user.keyEnabled) {
       return res.status(403).json({ error: 'Forbidden: API key is disabled' });
+    }
+
+    // Is the key being used from a device its owner approved?
+    if (!(await deviceApproved(user, deviceToken, req))) {
+      return res.status(403).json({
+        error: 'Forbidden: this device is not approved. Approve it on your dashboard.',
+      });
     }
 
     // Per-account quota, regardless of which IP the key is used from.

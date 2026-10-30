@@ -20,8 +20,11 @@ Requires the `requests` library:  pip install requests
 
 import argparse
 import getpass
+import hashlib
 import os
 import re
+import secrets
+import socket
 import sys
 import time
 import webbrowser
@@ -44,6 +47,45 @@ def safe(value):
     return _CONTROL_CHARS.sub("", str(value))
 
 
+# --- Device identity -------------------------------------------------------
+# A key only works from devices its owner approved on the dashboard. This
+# client keeps a random device token in a private file and sends it with every
+# request. A stolen key alone is useless: the thief's machine shows up as a
+# new *pending* device the owner won't approve.
+DEVICE_TOKEN = None  # loaded in main()
+DEVICE_FILE = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config")), "aap", "device"
+)
+
+
+def load_device_token():
+    """Read this machine's device token, creating it (mode 600) on first run."""
+    try:
+        with open(DEVICE_FILE) as f:
+            token = f.read().strip()
+        if re.fullmatch(r"[0-9a-f]{64}", token):
+            return token
+    except FileNotFoundError:
+        pass
+    token = secrets.token_hex(32)
+    os.makedirs(os.path.dirname(DEVICE_FILE), mode=0o700, exist_ok=True)
+    fd = os.open(DEVICE_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(token)
+    return token
+
+
+def device_code(token):
+    """Pairing code — matches what the dashboard shows for this device."""
+    c = hashlib.sha256(token.encode()).hexdigest()[:6].upper()
+    return f"{c[:3]}-{c[3:]}"
+
+
+def auth_headers(api_key, device_token):
+    name = re.sub(r"[^A-Za-z0-9._ -]", "", socket.gethostname())[:64] or "unnamed device"
+    return {"X-API-Key": api_key, "X-AAP-Device": device_token, "X-AAP-Device-Name": name}
+
+
 def check_session(base, api_key):
     """Ask whether the key is usable right now.
 
@@ -53,7 +95,7 @@ def check_session(base, api_key):
     try:
         r = requests.get(
             f"{base}/auth/session-status",
-            headers={"X-API-Key": api_key},  # never in the URL (logs/history)
+            headers=auth_headers(api_key, DEVICE_TOKEN),  # never in the URL
             timeout=5,
         )
     except requests.RequestException as e:
@@ -77,9 +119,10 @@ def wait_for_session(base, api_key):
         return True
 
     # The server deliberately doesn't say WHY (so a stolen key reveals little).
-    print("Key not usable yet. Either:")
-    print(f"  • log in to the web app at {base}, or")
-    print("  • your key is waiting for an admin to enable it.")
+    print("Key not usable yet. Check that:")
+    print(f"  • you're logged in to the web app at {base},")
+    print(f"  • this device (code {device_code(DEVICE_TOKEN)}) is approved on your dashboard, and")
+    print("  • an admin has enabled your key.")
     try:
         webbrowser.open(base)
     except Exception:
@@ -100,7 +143,7 @@ def send_message(base, api_key, message):
     try:
         r = requests.post(
             f"{base}/api/message",
-            headers={"X-API-Key": api_key},
+            headers=auth_headers(api_key, DEVICE_TOKEN),
             json={"message": message},
             timeout=10,
         )
@@ -135,6 +178,9 @@ def main():
     base = args.base.rstrip("/")
 
     print("=== Account-Bound API Key Protection — shell client ===\n")
+    global DEVICE_TOKEN
+    DEVICE_TOKEN = load_device_token()
+    print(f"This device's pairing code: {device_code(DEVICE_TOKEN)}\n")
 
     if args.key:
         print("! Warning: --key is visible in process lists and shell history.\n")

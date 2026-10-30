@@ -44,6 +44,50 @@ async function loadDashboard(newKey) {
   if (!ok) { showAuth(); setMode('login'); return; }
   showDashboard(data);
   if (newKey) revealKey(newKey);
+  loadDevices();
+}
+
+// --- Devices ----------------------------------------------------------------
+// Rendered with DOM APIs + textContent only (device names are user input).
+async function loadDevices() {
+  const { ok, data } = await api('/auth/devices');
+  const tbody = $('device-list');
+  tbody.replaceChildren();
+  if (!ok) return;
+  $('device-empty').classList.toggle('hidden', data.devices.length > 0);
+  const cell = (...children) => {
+    const td = document.createElement('td');
+    td.append(...children);
+    return td;
+  };
+  const button = (label, action, id) => {
+    const b = document.createElement('button');
+    b.className = 'ghost small';
+    b.textContent = label;
+    b.onclick = async () => {
+      if (action === 'remove' && !confirm('Remove this device? It will no longer be able to use your key.')) return;
+      await api(`/auth/devices/${action}`, { method: 'POST', body: JSON.stringify({ id }) });
+      loadDevices();
+    };
+    return b;
+  };
+  for (const d of data.devices) {
+    const status = document.createElement('span');
+    status.className = 'badge ' + (d.status === 'approved' ? 'on' : 'off');
+    status.textContent = d.status;
+    const actions = cell();
+    if (d.status !== 'approved') actions.append(button('Approve', 'approve', d.publicId), ' ');
+    actions.append(button('Remove', 'remove', d.publicId));
+    const tr = document.createElement('tr');
+    tr.append(
+      cell(String(d.name)),
+      cell(String(d.code)),
+      cell(status),
+      cell(new Date(d.lastSeen).toLocaleString()),
+      actions
+    );
+    tbody.appendChild(tr);
+  }
 }
 
 function revealKey(key) {
@@ -113,6 +157,8 @@ $('copy-btn').onclick = async () => {
   $('copy-btn').textContent = 'Copied!';
   setTimeout(() => ($('copy-btn').textContent = 'Copy'), 1200);
 };
+
+$('devices-refresh').onclick = loadDevices;
 
 // --- On load: are we already logged in? ---
 loadDashboard();

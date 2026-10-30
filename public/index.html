@@ -73,6 +73,23 @@
         <button id="logout-all-btn" class="ghost small">Log out everywhere</button>
       </div>
 
+      <div class="devices">
+        <div class="row between">
+          <p class="muted">Devices allowed to use your key</p>
+          <button id="devices-refresh" class="ghost small">Refresh</button>
+        </div>
+        <p class="muted small">
+          Your key only works from devices you approve. The shell client prints a
+          pairing code — approve only if it matches. An unknown pending device
+          means your key is being used elsewhere: remove it and generate a new key.
+        </p>
+        <table>
+          <thead><tr><th>Device</th><th>Code</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+          <tbody id="device-list"></tbody>
+        </table>
+        <p id="device-empty" class="muted small hidden">No devices yet — run the shell client to register one.</p>
+      </div>
+
       <a id="admin-link" href="/admin.html" class="ghost hidden">Open admin panel →</a>
     </section>
   </div>

@@ -20,6 +20,7 @@ let client;
 let db;
 let users;
 let counters;
+let devices;
 
 /** Connect once and cache the handles. Safe to call repeatedly. */
 async function connect() {
@@ -29,10 +30,13 @@ async function connect() {
   db = client.db(DB_NAME);
   users = db.collection('users');
   counters = db.collection('counters');
+  devices = db.collection('devices');
   await users.createIndex({ email: 1 }, { unique: true });
   await users.createIndex({ id: 1 }, { unique: true });
   await migratePlaintextKeys();
   await users.createIndex({ apiKeyHash: 1 }, { unique: true });
+  await devices.createIndex({ userId: 1, deviceHash: 1 }, { unique: true });
+  await devices.createIndex({ publicId: 1 }, { unique: true });
   return db;
 }
 
@@ -205,6 +209,87 @@ async function setPassword(userId, password) {
   );
 }
 
+// --- Devices ---------------------------------------------------------------
+// A key only works from devices its owner has approved. The CLI holds a random
+// device token; we store only its SHA-256 hash, plus a short pairing code
+// (shown in both the CLI and the dashboard) so the owner can confirm they're
+// approving their own machine.
+
+const MAX_PENDING_DEVICES = 5;
+
+function hashDeviceToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex');
+}
+
+/** Pairing code shown to the user, e.g. "4F2-A9C". The CLI computes the same. */
+function deviceCode(deviceHash) {
+  const c = deviceHash.slice(0, 6).toUpperCase();
+  return `${c.slice(0, 3)}-${c.slice(3)}`;
+}
+
+function getDevice(userId, token) {
+  return devices.findOne({ userId, deviceHash: hashDeviceToken(token) });
+}
+
+/**
+ * Register an unknown device as pending. Keeps at most MAX_PENDING_DEVICES
+ * pending entries per user (oldest dropped) so a stolen key can't flood the
+ * owner's list.
+ */
+async function registerPendingDevice(userId, token, name) {
+  const deviceHash = hashDeviceToken(token);
+  const pending = await devices
+    .find({ userId, status: 'pending' })
+    .sort({ createdAt: 1 })
+    .toArray();
+  const excess = pending.length - (MAX_PENDING_DEVICES - 1);
+  if (excess > 0) {
+    await devices.deleteMany({ _id: { $in: pending.slice(0, excess).map((d) => d._id) } });
+  }
+  const now = new Date();
+  const doc = {
+    publicId: crypto.randomBytes(8).toString('hex'),
+    userId,
+    deviceHash,
+    code: deviceCode(deviceHash),
+    name,
+    status: 'pending',
+    createdAt: now,
+    lastSeen: now,
+  };
+  try {
+    await devices.insertOne(doc);
+  } catch (e) {
+    if (e.code !== 11000) throw e; // concurrent registration — fine
+  }
+  return doc;
+}
+
+function touchDevice(id) {
+  return devices.updateOne({ _id: id }, { $set: { lastSeen: new Date() } });
+}
+
+function listDevices(userId) {
+  return devices
+    .find({ userId }, { projection: { _id: 0, deviceHash: 0, userId: 0 } })
+    .sort({ createdAt: -1 })
+    .toArray();
+}
+
+/** Approve a device — scoped to the owner, so users can't touch others'. */
+async function approveDevice(userId, publicId) {
+  const r = await devices.updateOne(
+    { userId, publicId: String(publicId) },
+    { $set: { status: 'approved', approvedAt: new Date() } }
+  );
+  return r.matchedCount === 1;
+}
+
+async function removeDevice(userId, publicId) {
+  const r = await devices.deleteOne({ userId, publicId: String(publicId) });
+  return r.deletedCount === 1;
+}
+
 /** Admin helper: flip a user's API key on/off. Returns the new state. */
 async function setKeyEnabled(userId, enabled) {
   const doc = await users.findOneAndUpdate(
@@ -229,6 +314,12 @@ module.exports = {
   listUsers,
   setKeyEnabled,
   setPassword,
+  getDevice,
+  registerPendingDevice,
+  touchDevice,
+  listDevices,
+  approveDevice,
+  removeDevice,
   verifyPassword,
   DUMMY_HASH,
   rotateApiKey,
