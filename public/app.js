@@ -74,7 +74,9 @@ function showDashboard(user) {
   // Masked by default; the full key needs the password (Show key).
   maskedKey = user.apiKeyPrefix ? `${user.apiKeyPrefix}${'•'.repeat(12)}` : '— no active key —';
   hideKey();
-  $('reveal-btn').classList.toggle('hidden', !user.keyRevealable);
+  // Always offer "Show key"; explain when the current key can't be shown.
+  keyRevealable = !!user.keyRevealable;
+  $('key-legacy').classList.toggle('hidden', keyRevealable || !user.apiKeyPrefix || !!user.keyLock);
   $('key-state').textContent = user.keyEnabled
     ? 'Key is enabled.'
     : 'Not enabled yet — an admin must enable it.';
@@ -217,6 +219,7 @@ async function loadDevices() {
 // A revealed key is shown for a limited time, then masked again.
 const REVEAL_SECONDS = 30;
 let maskedKey = '';
+let keyRevealable = false;
 let hideTimer = null;
 
 function hideKey() {
@@ -298,6 +301,12 @@ $('protection-form').onsubmit = async (e) => {
 
 $('reveal-btn').onclick = async () => {
   $('rotate-error').textContent = '';
+  if (!keyRevealable) {
+    $('rotate-error').textContent = $('key-legacy').classList.contains('hidden')
+      ? 'You have no active key to show. Generate a new key.'
+      : "This key can't be shown — generate a new key once to enable Show key.";
+    return;
+  }
   const password = $('rotate-password').value;
   if (!password) {
     $('rotate-error').textContent = 'Enter your current password to view the key.';
