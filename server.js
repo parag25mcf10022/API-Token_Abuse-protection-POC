@@ -653,10 +653,11 @@ async function main() {
       onDelta: streaming ? (text) => res.write(ndjson({ type: 'delta', text })) : undefined,
     });
 
-    // Meter real model token counts when the LLM answered, else an estimate.
+    // Meter real model token counts when the LLM answered. Local answers never
+    // see the history, so they're charged for the message + reply only.
     const tokens = out.usage
       ? out.usage.input + out.usage.output
-      : est + policyLib.estimateTokens(out.reply);
+      : policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(out.reply);
     await usage.record(user, org, category, tokens);
 
     const meta = {
@@ -664,6 +665,7 @@ async function main() {
       category,
       tokens,
       model: out.model || null,
+      truncated: !!out.truncated,
       ms: Date.now() - started,
       processedAt: new Date().toISOString(),
     };

@@ -256,9 +256,10 @@ function classify(message) {
 }
 
 /** Try the local FAQ by keyword overlap; returns {answer, score} best match. */
-// Product FAQ needs 2 keyword hits (its keywords are generic); category tips
-// use distinctive keywords ("xss", "regex"), so 1 hit is enough.
-function faqMatch(norm, entries = FAQ, minHits = 2) {
+// Product FAQ needs 3 keyword hits (its keywords are generic, e.g. "api",
+// "key" — two of them shouldn't hijack a coding question); category tips use
+// distinctive keywords ("xss", "regex"), so 1 hit is enough.
+function faqMatch(norm, entries = FAQ, minHits = 3) {
   // Tokenize on word chars so trailing punctuation ("stolen?") still matches.
   const words = new Set(norm.match(/[a-z0-9]+/g) || []);
   let best = null;
@@ -327,7 +328,7 @@ async function generate(message, opts = {}) {
         onDelta: opts.onDelta,
       });
       if (cacheable) cacheSet(norm, { reply: out.reply, source: 'llm' });
-      return { reply: out.reply, source: 'llm', model: out.model, usage: out.usage };
+      return { reply: out.reply, source: 'llm', model: out.model, usage: out.usage, truncated: !!out.truncated };
     } catch (e) {
       // LLM down/slow → local tips or fallback below
     }

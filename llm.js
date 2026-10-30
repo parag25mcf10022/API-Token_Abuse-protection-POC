@@ -10,7 +10,7 @@
  *   OLLAMA_URL          http://localhost:11434
  *   LLM_MODEL           default model            (llama3.2:3b)
  *   LLM_MODEL_<CAT>     per-category override, e.g. LLM_MODEL_CODING=qwen2.5-coder:7b
- *   LLM_MAX_TOKENS      max reply tokens         (512)
+ *   LLM_MAX_TOKENS      max reply tokens         (1024)
  *   LLM_TIMEOUT_MS      whole-request timeout    (90000)
  */
 
@@ -25,12 +25,14 @@ const config = {
   routes: Object.fromEntries(
     CATEGORIES.map((c) => [c, process.env[`LLM_MODEL_${c.toUpperCase()}`]]).filter(([, m]) => m)
   ),
-  maxTokens: Number(process.env.LLM_MAX_TOKENS) || 512,
+  maxTokens: Number(process.env.LLM_MAX_TOKENS) || 1024,
   timeoutMs: Number(process.env.LLM_TIMEOUT_MS) || 90000,
 };
 
 const BASE_PROMPT = [
-  'You are the assistant behind an account-bound API. Be accurate, concise, and practical.',
+  'You are the assistant behind AAP, an account-bound API: a key only works while its owner is logged in',
+  'to the web app, from devices they approved, within scopes and usage limits set by admins; stolen keys',
+  'are auto-locked. Be accurate, concise, and practical.',
   'Prefer short paragraphs and bullet points. Use fenced code blocks for code.',
   'If you are unsure, say so instead of guessing.',
 ].join(' ');
@@ -83,7 +85,7 @@ async function status() {
 
 /**
  * Stream a chat completion. Calls onDelta(text) for each chunk and resolves
- * with { reply, model, usage: { input, output } }. Throws on failure so the
+ * with { reply, model, usage: { input, output }, truncated }. Throws on failure so the
  * engine can fall back to local answers.
  */
 async function chat({ category, history = [], message, onDelta }) {
@@ -110,6 +112,7 @@ async function chat({ category, history = [], message, onDelta }) {
   // Ollama streams newline-delimited JSON objects.
   let reply = '';
   let usage = { input: 0, output: 0 };
+  let truncated = false;
   let buf = '';
   const decoder = new TextDecoder();
   for await (const chunk of res.body) {
@@ -126,11 +129,14 @@ async function chat({ category, history = [], message, onDelta }) {
         reply += text;
         if (onDelta) onDelta(text);
       }
-      if (evt.done) usage = { input: evt.prompt_eval_count || 0, output: evt.eval_count || 0 };
+      if (evt.done) {
+        usage = { input: evt.prompt_eval_count || 0, output: evt.eval_count || 0 };
+        truncated = evt.done_reason === 'length'; // hit LLM_MAX_TOKENS
+      }
     }
   }
   if (!reply.trim()) throw new Error('Empty LLM reply');
-  return { reply, model, usage };
+  return { reply, model, usage, truncated };
 }
 
 module.exports = { config, enabled, status, chat, modelFor };

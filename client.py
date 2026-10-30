@@ -1,19 +1,20 @@
 #!/usr/bin/env python3
 """
-AAP shell client — the "bridge" in Account-Bound API Key Protection.
+AAP shell — the account-bound API client.
 
-Before honoring any API call, this client asks the server whether the account
-that owns the supplied API key has a *live browser session*. If not, the key
-is treated as dead: the user is sent to the web app to log in, and the client
-polls until the session goes active.
+Before any call, the server checks that the key's owner is logged in to the
+web app, that this device is approved, and that the request fits the key's
+scopes and limits. This client walks you through that, then gives you a
+streaming chat with the engine (local rules + LLM).
 
 Usage:
-    python3 client.py                       # prompts for the key (hidden)
-    AAP_API_KEY=ak_xxx python3 client.py    # or read it from the environment
-    python3 client.py --base http://localhost:3000
+    python3 client.py                          # interactive (key prompt is hidden)
+    AAP_API_KEY=ak_... python3 client.py       # key from the environment
+    python3 client.py -p "explain CSRF"        # one-shot: print the answer and exit
+    python3 client.py --base http://host:3000 --no-stream
 
-The key is sent only in the X-API-Key header, never in a URL. Avoid passing it
-as a command-line argument: argv is visible in `ps` and saved in shell history.
+The key is sent only in the X-API-Key header. Avoid --key: command-line
+arguments are visible in `ps` and saved in shell history.
 
 Requires the `requests` library:  pip install requests
 """
@@ -21,11 +22,15 @@ Requires the `requests` library:  pip install requests
 import argparse
 import getpass
 import hashlib
+import itertools
+import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import sys
+import threading
 import time
 import webbrowser
 
@@ -35,10 +40,11 @@ except ImportError:
     sys.exit("This client needs the 'requests' library:  pip install requests")
 
 
-# Output encoding for the terminal: server-supplied text (replies echo user
-# input) must not be able to inject ANSI/OSC escape sequences that rewrite the
-# screen, retitle the window, or plant clickable links. Strip C0/C1 control
-# characters (keeping newline and tab) before printing anything from the server.
+# --- Output safety -----------------------------------------------------------
+# Server-supplied text (replies echo user input) must not be able to inject
+# ANSI/OSC escape sequences that rewrite the screen, retitle the window, or
+# plant clickable links. Strip C0/C1 control characters (keeping newline and
+# tab) before printing anything from the server.
 _CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
@@ -47,7 +53,217 @@ def safe(value):
     return _CONTROL_CHARS.sub("", str(value))
 
 
-# --- Device identity -------------------------------------------------------
+# --- Styling -----------------------------------------------------------------
+COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR") and os.environ.get("TERM") != "dumb"
+
+
+def _sgr(code):
+    return (lambda s: f"\033[{code}m{s}\033[0m") if COLOR else (lambda s: s)
+
+
+bold, dim = _sgr("1"), _sgr("2")
+teal, violet, green, red, amber, cyan = (
+    _sgr("38;5;37"), _sgr("38;5;141"), _sgr("38;5;78"), _sgr("38;5;203"), _sgr("38;5;214"), _sgr("38;5;81"),
+)
+ACCENT = teal
+OK, BAD, WARN, INFO = green("✓"), red("✗"), amber("!"), teal("•")
+_ANSI = re.compile(r"\033\[[0-9;]*m")
+
+
+def width():
+    return max(48, min(shutil.get_terminal_size((88, 24)).columns, 100))
+
+
+def visible_len(s):
+    return len(_ANSI.sub("", s))
+
+
+def clip(s, n):
+    """Shorten plain text to n visible chars with an ellipsis."""
+    return s if len(s) <= n else s[: max(0, n - 1)] + "…"
+
+
+def panel(title, rows):
+    """Rounded box with a title in the top border. Rows are (style, text) pairs."""
+    w = width() - 2
+    print(ACCENT("╭─ ") + bold(title) + " " + ACCENT("─" * max(0, w - visible_len(title) - 4) + "╮"))
+    for style, text in rows:
+        text = clip(text, w - 3)
+        print(ACCENT("│") + " " + style(text) + " " * max(0, w - 2 - len(text)) + ACCENT("│"))
+    print(ACCENT("╰" + "─" * (w - 1) + "╯"))
+
+
+def rule():
+    if COLOR:
+        print(dim("─" * width()))
+
+
+def meter(used, limit, cells=22):
+    """Usage bar: green → amber → red as the limit gets close."""
+    if not isinstance(limit, int):
+        return dim("unlimited".ljust(cells)) + f"  {used:,}"
+    frac = min(1.0, used / limit) if limit else 1.0
+    filled = round(frac * cells)
+    color = green if frac < 0.7 else amber if frac < 0.9 else red
+    return color("█" * filled) + dim("░" * (cells - filled)) + f"  {used:,} / {limit:,}"
+
+
+class Spinner:
+    """Spinner shown until the first streamed text arrives (TTY only)."""
+
+    FRAMES = "◐◓◑◒"
+
+    def __init__(self, label):
+        self.label, self._stop, self._t = label, threading.Event(), None
+
+    def __enter__(self):
+        if COLOR:
+            self._t = threading.Thread(target=self._run, daemon=True)
+            self._t.start()
+        return self
+
+    def _run(self):
+        for frame in itertools.cycle(self.FRAMES):
+            if self._stop.is_set():
+                break
+            sys.stdout.write(f"\r  {violet(frame)} {dim(self.label)}")
+            sys.stdout.flush()
+            time.sleep(0.09)
+
+    def stop(self):
+        if self._t and not self._stop.is_set():
+            self._stop.set()
+            self._t.join()
+            sys.stdout.write("\r\033[2K")
+            sys.stdout.flush()
+
+    def __exit__(self, *exc):
+        self.stop()
+
+
+class MarkdownStream:
+    """
+    Streaming renderer for a light subset of markdown, safe on arbitrary chunk
+    boundaries: fenced code blocks get a gutter and colour, **bold** and
+    `inline code` are styled. Everything passes through safe() first.
+    """
+
+    def __init__(self, indent="  "):
+        self.indent = indent
+        self.in_code = False
+        self.bold = False
+        self.inline = False
+        self.line_start = True
+        self.linebuf = ""  # start of the current line, held back to spot ``` fences
+        self.pending = ""  # a single '*' that might become '**'
+
+    def feed(self, text):
+        for ch in safe(text):
+            self._char(ch)
+        sys.stdout.flush()
+
+    def _out(self, s):
+        sys.stdout.write(s)
+
+    def _begin_line(self):
+        self._out(self.indent)
+        if self.in_code:
+            # Gutter, then colour the whole code line in one go.
+            self._out(dim("│ ") + ("\033[38;5;81m" if COLOR else ""))
+        self.line_start = False
+
+    def _newline(self):
+        if self.in_code and COLOR:
+            self._out("\033[0m")
+        self._out("\n")
+        self.line_start = True
+
+    def _char(self, ch):
+        if self.line_start:
+            if ch == "\n":
+                self._end_line()
+                return
+            self.linebuf += ch
+            if "```".startswith(self.linebuf) or self.linebuf.startswith("```"):
+                return  # might be / is a fence: hold until newline (language tag)
+            if not self.in_code:
+                if set(self.linebuf) == {"="}:
+                    return  # possible "====" heading underline: hold
+                if self.linebuf in ("*", "-"):
+                    return  # possible list bullet: wait for the next char
+                if self.linebuf in ("* ", "- "):
+                    self.linebuf = ""
+                    self._begin_line()
+                    self._out(ACCENT("•") + " ")
+                    return
+            text, self.linebuf = self.linebuf, ""
+            self._begin_line()
+            self._emit(text)
+            return
+        if ch == "\n":
+            self._flush_pending()
+            self._newline()
+            return
+        self._emit(ch)
+
+    def _end_line(self):
+        """Newline while still at line start: either a fence or an empty line."""
+        text, self.linebuf = self.linebuf, ""
+        if not self.in_code and len(text) >= 3 and set(text) == {"="}:
+            return  # heading underline — the heading above is already bold
+        if text.startswith("```"):
+            lang = text[3:].strip()
+            self.in_code = not self.in_code
+            if self.in_code:
+                self._out(self.indent + dim("┌ " + (lang or "code")) + "\n")
+            else:
+                self._out(self.indent + dim("└") + "\n")
+            return
+        if text or self.in_code:  # keep the gutter on blank code lines
+            self._begin_line()
+            self._emit(text)
+        self._newline()
+
+    def _emit(self, text):
+        for ch in text:
+            if self.in_code:
+                self._out(ch)  # line colour already set in _begin_line
+                continue
+            if ch == "*":
+                self.pending += "*"
+                if self.pending == "**":
+                    self.bold = not self.bold
+                    self.pending = ""
+                    if COLOR:
+                        self._out("\033[1m" if self.bold else "\033[22m")
+                continue
+            self._flush_pending()
+            if ch == "`":
+                self.inline = not self.inline
+                if COLOR:
+                    self._out("\033[38;5;81m" if self.inline else "\033[39m")
+                continue
+            self._out(ch)
+
+    def _flush_pending(self):
+        if self.pending:
+            self._out(self.pending)
+            self.pending = ""
+
+    def close(self):
+        if self.linebuf:
+            self._begin_line()
+            self._emit(self.linebuf)
+            self.linebuf = ""
+        self._flush_pending()
+        if COLOR:
+            self._out("\033[0m")
+        if not self.line_start:
+            self._out("\n")
+        sys.stdout.flush()
+
+
+# --- Device identity -----------------------------------------------------------
 # A key only works from devices its owner approved on the dashboard. This
 # client keeps a random device token in a private file and sends it with every
 # request. A stolen key alone is useless: the thief's machine shows up as a
@@ -86,130 +302,297 @@ def auth_headers(api_key, device_token):
     return {"X-API-Key": api_key, "X-AAP-Device": device_token, "X-AAP-Device-Name": name}
 
 
-def check_session(base, api_key):
-    """Ask whether the key is usable right now.
+# --- Server calls ----------------------------------------------------------------
+class Client:
+    def __init__(self, base, api_key):
+        self.base, self.api_key = base, api_key
 
-    Returns (active, retry_after): active is True/False, or None if the server
-    couldn't be reached; retry_after is seconds to wait when rate limited.
-    """
-    try:
-        r = requests.get(
-            f"{base}/auth/session-status",
-            headers=auth_headers(api_key, DEVICE_TOKEN),  # never in the URL
-            timeout=5,
-        )
-    except requests.RequestException as e:
-        print(f"\n  ! Could not reach the server at {base}: {safe(e)}")
-        return None, 0
-    if r.status_code == 429:
-        return False, int(r.headers.get("Retry-After", "10"))
-    try:
-        return bool(r.json().get("active")), 0
-    except ValueError:
-        return None, 0
+    def headers(self):
+        return auth_headers(self.api_key, DEVICE_TOKEN)
+
+    def get(self, path, timeout=8):
+        return requests.get(f"{self.base}{path}", headers=self.headers(), timeout=timeout)
+
+    def session_active(self):
+        """(active, retry_after) — active is None if the server is unreachable."""
+        try:
+            r = self.get("/auth/session-status", timeout=5)
+        except requests.RequestException:
+            return None, 0
+        if r.status_code == 429:
+            return False, int(r.headers.get("Retry-After", "10"))
+        try:
+            return bool(r.json().get("active")), 0
+        except ValueError:
+            return None, 0
 
 
-def wait_for_session(base, api_key):
-    """Poll session-status until the key is usable. Returns True/False."""
-    active, _ = check_session(base, api_key)
+def wait_for_session(client, quiet=False):
+    """Block until the key is usable. Returns True, or False if unreachable."""
+    active, _ = client.session_active()
     if active is None:
+        print(f"  {BAD} Can't reach the server at {client.base}")
         return False
     if active:
-        print("✓ Key is active — your account is logged in.")
         return True
+    if not quiet:
+        print(f"  {WARN} {bold('Key not usable yet.')} The server checks that:")
+        print(f"      {INFO} you're logged in at {ACCENT(client.base)}")
+        print(f"      {INFO} this device ({bold(device_code(DEVICE_TOKEN))}) is approved on your dashboard")
+        print(f"      {INFO} an admin has enabled your key, and it isn't locked")
+        try:
+            webbrowser.open(client.base)
+        except Exception:
+            pass
+    with Spinner("waiting — log in / approve the device · Ctrl-C to cancel"):
+        while True:
+            active, retry = client.session_active()
+            if active:
+                break
+            time.sleep(max(2, retry))
+    print(f"  {OK} Key is active.")
+    return True
 
-    # The server deliberately doesn't say WHY (so a stolen key reveals little).
-    print("Key not usable yet. Check that:")
-    print(f"  • you're logged in to the web app at {base},")
-    print(f"  • this device (code {device_code(DEVICE_TOKEN)}) is approved on your dashboard, and")
-    print("  • an admin has enabled your key.")
+
+def show_error(r):
     try:
-        webbrowser.open(base)
-    except Exception:
-        pass  # headless / no browser — the printed URL is enough
-
-    print("Waiting (Ctrl-C to cancel)", end="", flush=True)
-    while True:
-        active, retry_after = check_session(base, api_key)
-        if active:
-            print("\n✓ Key is active — your account is logged in.")
-            return True
-        time.sleep(max(2, retry_after))
-        print(".", end="", flush=True)
+        msg = r.json().get("error", r.text)
+    except ValueError:
+        msg = r.text
+    hint = ""
+    if r.status_code == 403 and "device" in str(msg):
+        hint = f" — approve code {bold(device_code(DEVICE_TOKEN))} on your dashboard"
+    elif r.status_code == 429:
+        hint = f" — retry in {r.headers.get('Retry-After', '?')}s"
+    print(f"  {BAD} {red(str(r.status_code))} {safe(msg)}{hint}")
 
 
-def send_message(base, api_key, message):
-    """POST the message to the protected endpoint and print the result."""
+# --- Slash commands ---------------------------------------------------------------
+HELP = [
+    ("/help", "show this list"),
+    ("/usage", "your scopes, limits and usage"),
+    ("/model", "engine and model in use"),
+    ("/device", "this device's pairing code"),
+    ("/clear", "forget the conversation so far"),
+    ("/save <file>", "save the conversation as markdown"),
+    ("/status", "re-check session and device"),
+    ("/exit", "quit (also Ctrl-D)"),
+]
+
+
+def cmd_usage(client):
+    r = client.get("/api/usage")
+    if r.status_code != 200:
+        return show_error(r)
+    d = r.json()
+    lim, u = d.get("limits", {}), d["usage"]
+    acct = f"{d['org']['name']} · {d['org']['role']}" if d.get("org") else "personal"
+    print(f"  {bold('Account')}  {safe(acct)}")
+    print(f"  {bold('Scopes')}   " + " ".join(violet(safe(s)) for s in d["scopes"]))
+    print(f"  {bold('LLM')}      " + (green("allowed") if d.get("llm") else amber("not allowed — local engine only")))
+    print()
+    for label, used, cap in (
+        ("requests today ", u["today"]["requests"], lim.get("requestsPerDay")),
+        ("requests month ", u["month"]["requests"], lim.get("requestsPerMonth")),
+        ("tokens today   ", u["today"]["tokens"], lim.get("tokensPerDay")),
+        ("tokens month   ", u["month"]["tokens"], lim.get("tokensPerMonth")),
+    ):
+        print(f"  {dim(label)} {meter(used, cap)}")
+    by_cat = u["today"]["byCategory"]
+    if by_cat:
+        cats = ", ".join(f"{safe(k)} {v}" for k, v in sorted(by_cat.items(), key=lambda x: -x[1]))
+        print(f"  {dim('by category    ')} {cats}")
+
+
+def cmd_model(client):
+    r = client.get("/api/engine")
+    if r.status_code != 200:
+        return show_error(r)
+    d = r.json()
+    if not d.get("enabled"):
+        print(f"  {INFO} LLM disabled on the server — local engine only")
+        return
+    state = green("online") if d.get("reachable") else red("unreachable — local fallback in use")
+    print(f"  {bold('Provider')} {safe(d['provider'])} ({state})")
+    print(f"  {bold('Model')}    {safe(d['model'])}")
+    for cat, model in (d.get("routes") or {}).items():
+        print(f"  {dim('  ' + cat.ljust(8))} {safe(model)}")
+    if d.get("missing"):
+        print(f"  {WARN} not installed on the server: {safe(', '.join(d['missing']))}")
+
+
+def save_transcript(path, history):
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"# AAP conversation — {time.strftime('%Y-%m-%d %H:%M')}\n\n")
+        for turn in history:
+            who = "You" if turn["role"] == "user" else "Assistant"
+            f.write(f"**{who}:**\n\n{turn['content']}\n\n")
+
+
+# --- Chat -------------------------------------------------------------------------
+MAX_HISTORY = 12  # messages (6 exchanges) sent for context
+
+
+def ask(client, message, history, stream=True):
+    """Send one message and render the reply. Returns (reply, ok, status)."""
+    body = {"message": message, "history": history[-MAX_HISTORY:], "stream": stream}
+    started = time.time()
     try:
         r = requests.post(
-            f"{base}/api/message",
-            headers=auth_headers(api_key, DEVICE_TOKEN),
-            json={"message": message},
-            timeout=10,
+            f"{client.base}/api/message", headers=client.headers(), json=body, timeout=180, stream=stream
         )
     except requests.RequestException as e:
-        print(f"  ! Request failed: {e}")
-        return
+        print(f"  {BAD} Request failed: {safe(e)}")
+        return None, False, 0
+    if r.status_code != 200:
+        show_error(r)
+        return None, False, r.status_code
 
-    data = {}
-    try:
-        data = r.json()
-    except ValueError:
-        pass
-
-    if r.status_code == 200:
-        print("\n── Response ──────────────────────────────")
-        print(safe(data.get("reply", data)))
-        print(f"  (processed at {safe(data.get('processedAt', 'n/a'))})")
-    elif r.status_code == 401:
-        print(f"\n401 Unauthorized: {safe(data.get('error', 'No active session found'))}")
+    reply, meta = "", {}
+    md = MarkdownStream()
+    if stream:
+        with Spinner("thinking…") as spin:
+            for line in r.iter_lines(decode_unicode=True):
+                if not line:
+                    continue
+                evt = json.loads(line)
+                if evt.get("type") == "delta":
+                    spin.stop()
+                    reply += evt["text"]
+                    md.feed(evt["text"])
+                elif evt.get("type") == "done":
+                    meta = evt
     else:
-        print(f"\n{r.status_code}: {safe(data.get('error', r.text))}")
+        d = r.json()
+        reply, meta = d.get("reply", ""), d
+        md.feed(reply)
+    md.close()
+
+    took = meta.get("ms", int((time.time() - started) * 1000)) / 1000
+    parts = [safe(meta.get("category", "?")), safe(meta.get("source", "?"))]
+    if meta.get("model"):
+        parts.append(safe(meta["model"]))
+    parts += [f"{meta.get('tokens', 0):,} tok", f"{took:.1f}s"]
+    if meta.get("truncated"):
+        parts.append(amber("truncated — ask me to continue"))
+    print(dim("  ↳ " + " · ".join(parts)))
+    return reply, True, 200
 
 
+def repl(client, stream):
+    history = []
+    print(dim("  /help for commands · Ctrl-D to exit"))
+    while True:
+        print()
+        rule()
+        try:
+            line = input(ACCENT("› ")).strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return
+        if not line:
+            if not sys.stdin.isatty():
+                return  # piped input: a blank line ends the session
+            continue
+
+        if line.startswith("/"):
+            cmd, _, arg = line.partition(" ")
+            if cmd in ("/exit", "/quit"):
+                return
+            elif cmd == "/help":
+                for name, desc in HELP:
+                    print(f"  {violet(name.ljust(14))} {dim(desc)}")
+            elif cmd == "/usage":
+                cmd_usage(client)
+            elif cmd == "/model":
+                cmd_model(client)
+            elif cmd == "/device":
+                print(f"  {bold('Pairing code')} {bold(device_code(DEVICE_TOKEN))}  {dim(DEVICE_FILE)}")
+            elif cmd == "/clear":
+                history.clear()
+                print(f"  {OK} Conversation cleared.")
+            elif cmd == "/save":
+                if not arg.strip():
+                    print(f"  {WARN} Usage: /save <file.md>")
+                else:
+                    save_transcript(arg.strip(), history)
+                    print(f"  {OK} Saved {len(history)} messages to {arg.strip()}")
+            elif cmd == "/status":
+                if wait_for_session(client):
+                    print(f"  {OK} Logged in · device approved · key enabled")
+            else:
+                print(f"  {WARN} Unknown command {safe(cmd)} — try /help")
+            continue
+
+        print()
+        reply, ok, status = ask(client, line, history, stream)
+        if ok:
+            history += [{"role": "user", "content": line}, {"role": "assistant", "content": reply}]
+            del history[:-MAX_HISTORY]
+        elif status == 401 and wait_for_session(client, quiet=True):
+            print(dim("  Session restored — send your message again."))
+
+
+# --- Entry point ------------------------------------------------------------------
 def main():
-    ap = argparse.ArgumentParser(description="AAP shell client")
+    ap = argparse.ArgumentParser(description="AAP shell — account-bound API client")
     ap.add_argument("--base", default="http://localhost:3000", help="server base URL")
     ap.add_argument(
         "--key",
         help="API key (discouraged: visible in ps/shell history; prefer AAP_API_KEY or the prompt)",
     )
+    ap.add_argument("-p", "--print", dest="prompt", help="one-shot: send PROMPT, print the answer, exit")
+    ap.add_argument("--no-stream", action="store_true", help="wait for the full answer instead of streaming")
     args = ap.parse_args()
     base = args.base.rstrip("/")
 
-    print("=== Account-Bound API Key Protection — shell client ===\n")
     global DEVICE_TOKEN
     DEVICE_TOKEN = load_device_token()
-    print(f"This device's pairing code: {device_code(DEVICE_TOKEN)}\n")
 
     if args.key:
-        print("! Warning: --key is visible in process lists and shell history.\n")
+        print(f"{WARN} --key is visible in process lists and shell history.")
     api_key = (
-        args.key
-        or os.environ.get("AAP_API_KEY")
-        or getpass.getpass("Enter your API key (input hidden): ")
+        args.key or os.environ.get("AAP_API_KEY") or getpass.getpass("API key (input hidden): ")
     ).strip()
     if not api_key:
         sys.exit("No API key provided.")
+    client = Client(base, api_key)
 
-    # Step 1: verify the browser session before doing anything useful.
-    if not wait_for_session(base, api_key):
+    if args.prompt:  # one-shot mode for scripts
+        if not wait_for_session(client, quiet=True):
+            sys.exit(1)
+        _, ok, _ = ask(client, args.prompt, [], stream=not args.no_stream)
+        sys.exit(0 if ok else 1)
+
+    print()
+    plain = lambda s: s
+    panel(
+        "◆ AAP shell",
+        [
+            (dim, "Account-bound API client — your key only works while you're logged in."),
+            (plain, ""),
+            (plain, f"server   {safe(base)}"),
+            (plain, f"device   {device_code(DEVICE_TOKEN)}  ({DEVICE_FILE.replace(os.path.expanduser('~'), '~')})"),
+        ],
+    )
+    print()
+    if not wait_for_session(client):
         sys.exit(1)
-
-    # Step 2: now that the session is live, send messages.
-    print("\nSession verified — you can now send messages.")
-    print("(blank line or Ctrl-C to quit)\n")
+    print(f"  {OK} Logged in · device approved · key enabled")
     try:
-        while True:
-            message = input("message> ").strip()
-            if not message:
-                break
-            send_message(base, api_key, message)
-            print()
-    except (KeyboardInterrupt, EOFError):
-        print()
+        r = client.get("/api/engine")
+        if r.status_code == 200 and r.json().get("enabled"):
+            e = r.json()
+            state = green("online") if e.get("reachable") else amber("offline, local fallback")
+            print(f"  {OK} Engine {safe(e['provider'])} · {safe(e['model'])} ({state})")
+    except (requests.RequestException, ValueError):
+        pass
 
-    print("Done.")
+    try:
+        repl(client, stream=not args.no_stream)
+    except KeyboardInterrupt:
+        print()
+    print(dim("  bye"))
 
 
 if __name__ == "__main__":
