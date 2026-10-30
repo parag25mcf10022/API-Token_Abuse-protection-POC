@@ -37,7 +37,9 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 - **Dashboard:** plan and usage view, devices, master key generation for org
   admins.
 - **`org_client.py`:** manage an org with its master key.
-- `CHANGELOG.md`.
+- `CHANGELOG.md`, MIT `LICENSE`, and a roadmap in the README.
+- Refreshed UI: status strip, card layout, usage meters, admin summary tiles,
+  and dark mode.
 
 ### Security
 - Fixed **NoSQL operator injection**: keys and credentials must be strings
