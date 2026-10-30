@@ -22,7 +22,23 @@ const ALERT_TONES = {
   limit_exceeded: 'warn',
   key_revoked: 'off',
   reveal_lockout: 'off',
+  unapproved_device_use: 'warn',
+  auto_protect: 'off',
 };
+
+const PROTECTION_OPTIONS = [
+  ['disable', 'On compromise: disable key'],
+  ['rotate', 'On compromise: rotate key'],
+  ['alert', 'On compromise: alert only'],
+];
+
+function protectionSelect(current, onchange) {
+  const sel = el('select', {});
+  for (const [v, label] of PROTECTION_OPTIONS) sel.append(el('option', { value: v }, label));
+  sel.value = current || 'disable';
+  sel.onchange = () => onchange(sel.value);
+  return sel;
+}
 
 const ALERT_LABELS = {
   new_device: 'New device',
@@ -31,6 +47,8 @@ const ALERT_LABELS = {
   limit_exceeded: 'Limit exceeded',
   key_revoked: 'Key revoked',
   reveal_lockout: 'Key-view lockout',
+  unapproved_device_use: 'Unapproved device use',
+  auto_protect: 'Key auto-locked',
 };
 
 async function api(path, opts = {}) {
@@ -151,6 +169,7 @@ function renderOrgs() {
         `Usage today: ${o.usage.today.requests} requests, ${o.usage.today.tokens} tokens · this month: ${o.usage.month.requests} requests, ${o.usage.month.tokens} tokens`),
       el('p', { class: 'small' }, `New-member defaults — ${describePolicy(o.memberDefaults)}`),
       el('div', { class: 'row' },
+        protectionSelect(o.protection, (action) => act(post(`/api/admin/orgs/${o.id}/protection`, { action }))),
         button('Edit org pool limits', () => openEditor(`Org pool: ${o.name}`, o.policy,
           (policy) => post(`/api/admin/orgs/${o.id}/policy`, { field: 'policy', policy }))),
         button('Edit member defaults', () => openEditor(`New-member defaults: ${o.name}`, o.memberDefaults,
@@ -168,7 +187,8 @@ function renderUsers() {
     if (u.isAdmin) who.append(' ', badge(true, 'super admin'));
     const org = u.orgId ? `${orgName(u.orgId)} · ${u.orgRole}` : '—';
     const key = el('span', {},
-      u.keyRevoked ? badge(false, 'revoked') : badge(u.keyEnabled, u.keyEnabled ? 'enabled' : 'disabled'),
+      u.keyLock ? badge(false, u.keyLock.action === 'rotate' ? 'auto-rotated' : 'auto-locked')
+        : u.keyRevoked ? badge(false, 'revoked') : badge(u.keyEnabled, u.keyEnabled ? 'enabled' : 'disabled'),
       el('br'), el('span', { class: 'muted small' }, u.apiKeyPrefix ? `${u.apiKeyPrefix}…` : 'no key'));
     const usage = `${u.usage.today.requests} req · ${u.usage.today.tokens} tok`;
     const actions = td(
@@ -181,6 +201,25 @@ function renderUsers() {
           act(post(`/api/admin/users/${u.id}/revoke-key`));
         }
       }));
+    if (u.keyLock) {
+      if (!u.keyLock.regenApproved) {
+        actions.append(' ', button('Approve regeneration', () =>
+          act(post(`/api/admin/users/${u.id}/approve-regeneration`))));
+      } else {
+        actions.append(' ', el('span', { class: 'muted small' }, 'regeneration approved'));
+      }
+      if (u.keyLock.action === 'disable') {
+        actions.append(' ', button('Unlock (false alarm)', () => {
+          if (confirm(`Unlock ${u.email}'s key? The same key will work again.`)) {
+            act(post(`/api/admin/users/${u.id}/unlock`));
+          }
+        }));
+      }
+    }
+    if (!u.orgId && !u.isAdmin) {
+      actions.append(' ', protectionSelect(u.protection, (action) =>
+        act(post(`/api/admin/users/${u.id}/protection`, { action }))));
+    }
     if (isSuper && !u.isAdmin) {
       const sel = el('select', {}, el('option', { value: '' }, 'No org'));
       for (const o of state.orgs) {

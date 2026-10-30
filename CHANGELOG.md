@@ -4,6 +4,27 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Added (compromise auto-response)
+- Keys are **automatically disabled or rotated** when they look compromised
+  or abused:
+  - repeated use from unapproved devices (3 per day),
+  - 3+ new devices in 24 hours,
+  - a lockout while viewing the key,
+  - 50+ limit-blocked requests in a day.
+- The action (`alert` | `disable` | `rotate`, default `disable`) is set per
+  org by org admins, or per personal account by its owner (password
+  required) or the super admin.
+- **Recovery:**
+  - Team/enterprise members need an org admin to **approve regeneration**,
+    then generate the new key with their password.
+  - Personal users regenerate with their password.
+  - Admins can **unlock** a disabled key after a false alarm.
+- New alerts `auto_protect` and `unapproved_device_use`; dashboard lock
+  banner and protection setting; admin approve/unlock controls;
+  `org_client.py approve-regen | unlock | protection`.
+- Accounts pointing at an org that no longer exists are treated as personal.
+- Documented that email verification is deferred to M3.
+
 ### Added (key viewing)
 - **View your API key** (`POST /auth/reveal-key`) after re-entering your
   password, in a live session:

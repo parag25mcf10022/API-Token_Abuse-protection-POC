@@ -241,6 +241,7 @@ async function rotateApiKey(userId) {
         apiKeyPrefix: keyPrefix(apiKey),
         apiKeyEnc: keyVault.encrypt(apiKey, Number(userId)),
         keyRevoked: false,
+        keyLock: null, // regenerating clears any compromise lock
       },
     }
   );
@@ -376,6 +377,30 @@ async function noteLoginIp(userId, ip) {
   return known.length > 0;
 }
 
+/** Set or clear (null) the compromise lock on a user's key. */
+function setKeyLock(userId, lock) {
+  return users.updateOne({ id: Number(userId) }, { $set: { keyLock: lock } });
+}
+
+/** Mark a locked key as approved for regeneration (org admin decision). */
+async function approveRegeneration(userId) {
+  const r = await users.updateOne(
+    { id: Number(userId), keyLock: { $type: 'object' } },
+    { $set: { 'keyLock.regenApproved': true } }
+  );
+  return r.matchedCount === 1;
+}
+
+/** Personal accounts: what to do automatically when the key looks compromised. */
+function setProtection(userId, action) {
+  return users.updateOne({ id: Number(userId) }, { $set: { protection: { action } } });
+}
+
+/** New devices registered for a user since `since` (device-spray signal). */
+function countDevicesSince(userId, since) {
+  return devices.countDocuments({ userId, createdAt: { $gt: since } });
+}
+
 function setUserPolicy(userId, policy) {
   return users.updateOne({ id: Number(userId) }, { $set: { policy } });
 }
@@ -477,6 +502,10 @@ module.exports = {
   revokeApiKey,
   noteLoginIp,
   setUserPolicy,
+  setKeyLock,
+  approveRegeneration,
+  setProtection,
+  countDevicesSince,
   setUserOrg,
   listUsersInOrg,
   createOrg,

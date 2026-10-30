@@ -16,6 +16,9 @@ Usage:
     python3 org_client.py set-policy 7 --all-scopes          # remove scope restriction
     python3 org_client.py org-policy --field policy --limit requestsPerDay=5000
     python3 org_client.py enable 7 | disable 7 | revoke 7
+    python3 org_client.py approve-regen 7     # let a locked member generate a new key
+    python3 org_client.py unlock 7            # false alarm: restore a disabled key
+    python3 org_client.py protection rotate   # org-wide: alert | disable | rotate
     python3 org_client.py resolve <alert-id>
 
 The master key is read from AAP_MASTER_KEY or a hidden prompt — never pass it
@@ -66,9 +69,11 @@ def main():
     p.add_argument("alert_id")
     p = sub.add_parser("add-member", help="create a member (prompts for initial password)")
     p.add_argument("email")
-    for name in ("enable", "disable", "revoke"):
+    for name in ("enable", "disable", "revoke", "approve-regen", "unlock"):
         p = sub.add_parser(name, help=f"{name} a member's key")
         p.add_argument("user_id", type=int)
+    p = sub.add_parser("protection", help="org-wide action when a key looks compromised")
+    p.add_argument("action", choices=["alert", "disable", "rotate"])
     for name, helptext in (("set-policy", "set a member's policy"), ("org-policy", "set org pool / member defaults")):
         p = sub.add_parser(name, help=helptext)
         if name == "set-policy":
@@ -111,7 +116,8 @@ def main():
             print(f"  usage today: {o['usage']['today']['requests']} req / {o['usage']['today']['tokens']} tok")
         print("\nMembers:")
         for u in d["users"]:
-            key = "revoked" if u["keyRevoked"] else ("enabled" if u["keyEnabled"] else "disabled")
+            key = ("LOCKED" if u.get("keyLock") else
+                   "revoked" if u["keyRevoked"] else ("enabled" if u["keyEnabled"] else "disabled"))
             print(f"  #{u['id']:<4} {safe(u['email']):<28} {safe(u['orgRole'] or ''):<7} key {key:<8} "
                   f"today {u['usage']['today']['requests']} req / {u['usage']['today']['tokens']} tok")
             print(f"        scopes {safe(u['policy'].get('scopes') or 'all')}  limits {safe(json.dumps(u['policy'].get('limits', {})))}")
@@ -136,6 +142,16 @@ def main():
     elif args.cmd == "revoke":
         d = call("POST", f"/users/{args.user_id}/revoke-key")
         print(f"Key revoked; {d['sessionsEnded']} session(s) ended. The user must generate a new key.")
+    elif args.cmd == "approve-regen":
+        call("POST", f"/users/{args.user_id}/approve-regeneration")
+        print(f"User #{args.user_id} may now generate a new key (with their password).")
+    elif args.cmd == "unlock":
+        call("POST", f"/users/{args.user_id}/unlock")
+        print(f"User #{args.user_id} key unlocked.")
+    elif args.cmd == "protection":
+        org_id = call("GET", "/overview")["actor"]["orgId"]
+        d = call("POST", f"/orgs/{org_id}/protection", {"action": args.action})
+        print(f"On compromise, the org will now: {d['action']}")
     elif args.cmd == "set-policy":
         d = call("POST", f"/users/{args.user_id}/policy", {"policy": build_policy(args)})
         print(f"Policy for user #{d['userId']}: {safe(json.dumps(d['policy']))}")

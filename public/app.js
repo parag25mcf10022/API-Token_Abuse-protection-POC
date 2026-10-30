@@ -20,6 +20,18 @@ function showAuth() {
   $('topbar-user').classList.add('hidden');
 }
 
+const REASON_LABELS = {
+  unapproved_device_use: 'repeated use from unapproved devices',
+  device_spray: 'your key appeared on many new devices',
+  reveal_lockout: 'too many wrong passwords while viewing the key',
+  limit_abuse: 'excessive limit-blocked requests',
+};
+const PROTECTION_LABELS = {
+  disable: 'disable the key automatically',
+  rotate: 'rotate (revoke) the key automatically',
+  alert: 'alert only',
+};
+
 function setPill(id, text, tone) {
   const pill = $(id);
   pill.textContent = text;
@@ -78,7 +90,28 @@ function showDashboard(user) {
   $('admin-link').classList.toggle('hidden', !(user.isAdmin || orgAdmin));
   $('admin-link').textContent = user.isAdmin ? 'Open admin panel →' : 'Manage your organization →';
 
-  $('revoked-banner').classList.toggle('hidden', !user.keyRevoked);
+  // Auto-lock after suspected compromise, and how to recover.
+  const lk = user.keyLock;
+  $('lock-banner').classList.toggle('hidden', !lk);
+  if (lk) {
+    const how = lk.action === 'rotate' ? 'The old key was revoked for good.' : 'The key is disabled.';
+    const next = !user.org
+      ? 'Generate a new key below with your password.'
+      : lk.regenApproved
+        ? 'Your admin approved regeneration — generate a new key below.'
+        : 'Your organization admin must approve regeneration before you can generate a new key.';
+    $('lock-text').textContent = `Reason: ${REASON_LABELS[lk.reason] || lk.reason}. ${how} ${next}`;
+  }
+  if (lk) setPill('status-key', 'Locked', 'bad');
+
+  // Compromise protection: personal accounts choose; org members see it.
+  const prot = user.protection || {};
+  $('protection-form').classList.toggle('hidden', !prot.canChange);
+  $('protection-action').value = prot.action || 'disable';
+  $('protection-owner').textContent = prot.canChange ? 'Your choice' : 'Set by your organization admin';
+  $('protection-current').textContent = `Current: ${PROTECTION_LABELS[prot.action] || prot.action}.`;
+
+  $('revoked-banner').classList.toggle('hidden', !user.keyRevoked || !!lk);
   $('revoked-text').textContent = user.apiKeyPrefix
     ? ''
     : 'You have no active key (new accounts and revoked keys need a fresh one).';
@@ -251,6 +284,16 @@ $('rotate-form').onsubmit = async (e) => {
     return;
   }
   loadDashboard(data.apiKey);
+};
+
+$('protection-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('protection-error').textContent = '';
+  const body = JSON.stringify({ action: $('protection-action').value, password: $('protection-password').value });
+  const { ok, data } = await api('/auth/protection', { method: 'POST', body });
+  $('protection-password').value = '';
+  if (!ok) { $('protection-error').textContent = data.error || 'Could not save.'; return; }
+  loadDashboard();
 };
 
 $('reveal-btn').onclick = async () => {

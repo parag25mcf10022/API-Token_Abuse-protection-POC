@@ -28,6 +28,7 @@ const usage = require('./usage');
 const alerts = require('./alerts');
 const policyLib = require('./policy');
 const { createAdminRouter } = require('./adminRoutes');
+const { createProtection, ACTIONS: PROTECTION_ACTIONS } = require('./protection');
 
 // Optional LLM fallback for messages the local engine can't confidently
 // answer. Disabled unless you wire one up (kept null here so the demo makes
@@ -47,6 +48,7 @@ async function main() {
   const mongo = await db.connect();
   await usage.init(mongo);
   await alerts.init(mongo);
+  const protection = createProtection({ db, alerts });
 
   const app = express();
   app.disable('x-powered-by');
@@ -234,6 +236,10 @@ async function main() {
         detail: `Key used from a new device "${name}" (code ${d.code}).`,
         ip: req.ip,
       });
+      const recent = await db.countDevicesSince(user.id, new Date(Date.now() - 24 * 3600 * 1000));
+      if (protection.crossed('device_spray', recent)) {
+        await protection.trigger(user, 'device_spray', { ip: req.ip });
+      }
       return false;
     }
     if (device.status !== 'approved') return false;
@@ -352,6 +358,7 @@ async function main() {
           detail: 'Too many wrong passwords while viewing the API key; session ended.',
           ip: req.ip,
         });
+        await protection.trigger(user, 'reveal_lockout', { ip: req.ip });
         return req.session.destroy(() => {
           res.clearCookie('aap.sid');
           res.status(401).json({
@@ -376,6 +383,29 @@ async function main() {
     const quota = limits.revealOk.hit(userId);
     if (!quota.allowed) return tooMany(res, quota.retryAfterSec);
     res.json({ apiKey });
+  }));
+
+  // Personal accounts choose what happens automatically if their key looks
+  // compromised. Requires the current password. Org members get their org's
+  // setting, chosen by an admin.
+  app.post('/auth/protection', requireLogin, wrap(async (req, res) => {
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (await db.getOrg(user.orgId)) return res.status(403).json({ error: 'Set by your organization admin.' });
+    const failKey = `rotate|${user.id}`;
+    const lock = limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const { action, password } = req.body || {};
+    if (!PROTECTION_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `action must be one of: ${PROTECTION_ACTIONS.join(', ')}.` });
+    }
+    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+      limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    limits.loginFail.reset(failKey);
+    await db.setProtection(user.id, action);
+    res.json({ action });
   }));
 
   // --- Device management (owner only, scoped to the session's user) -------
@@ -407,6 +437,14 @@ async function main() {
       email: user.email,
       apiKeyPrefix: user.apiKeyPrefix, // full key only via /auth/reveal-key
       keyRevealable: !!user.apiKeyEnc && !user.keyRevoked,
+      keyLock: user.keyLock
+        ? { reason: user.keyLock.reason, action: user.keyLock.action, at: user.keyLock.at, regenApproved: !!user.keyLock.regenApproved }
+        : null,
+      protection: {
+        action: await protection.effectiveAction(user),
+        // Personal accounts choose for themselves; org members' is set by admins.
+        canChange: !org,
+      },
       keyEnabled: user.keyEnabled,
       keyRevoked: !!user.keyRevoked, // admin revoked it → owner must generate a new one
       isAdmin: user.isAdmin,
@@ -434,6 +472,14 @@ async function main() {
       return res.status(401).json({ error: 'Incorrect password.' });
     }
     limits.loginFail.reset(failKey);
+    // Team/enterprise members whose key was locked as compromised need an
+    // org admin to approve regeneration first. Personal accounts verify with
+    // their password (above) and can regenerate straight away.
+    if (user.keyLock && !user.keyLock.regenApproved && (await db.getOrg(user.orgId))) {
+      return res.status(403).json({
+        error: 'Your key was locked after suspected compromise. Your org admin must approve regeneration first.',
+      });
+    }
     const apiKey = await db.rotateApiKey(user.id);
     res.json({ apiKey, keyEnabled: user.keyEnabled });
   }));
@@ -462,6 +508,7 @@ async function main() {
     }
     const active =
       user.keyEnabled &&
+      !user.keyLock &&
       (await deviceApproved(user, deviceToken, req)) &&
       (await userHasActiveSession(user.id));
     res.json({ active });
@@ -499,8 +546,22 @@ async function main() {
       return res.status(403).json({ error: 'Forbidden: API key is disabled' });
     }
 
-    // Is the key being used from a device its owner approved?
+    // Locked automatically after suspected compromise/abuse?
+    if (user.keyLock) {
+      return res.status(403).json({ error: 'Forbidden: key locked after suspected compromise' });
+    }
+
+    // Is the key being used from a device its owner approved? Repeated
+    // attempts from unapproved devices look like a stolen key.
     if (!(await deviceApproved(user, deviceToken, req))) {
+      const tries = await alerts.raise('unapproved_device_use', user, {
+        detail: 'API call from a device the owner has not approved.',
+        ip: req.ip,
+        daily: true,
+      });
+      if (protection.crossed('unapproved_device_use', tries)) {
+        await protection.trigger(user, 'unapproved_device_use', { ip: req.ip });
+      }
       return res.status(403).json({
         error: 'Forbidden: this device is not approved. Approve it on your dashboard.',
       });
@@ -528,10 +589,13 @@ async function main() {
     const est = policyLib.estimateTokens(msg.value);
     const quota = await usage.check(user, org, category, est);
     if (!quota.ok) {
-      await alerts.raise('limit_exceeded', user, {
+      const hits = await alerts.raise('limit_exceeded', user, {
         detail: `${quota.level} limit ${quota.limit} (${quota.max}) reached.`,
         daily: true,
       });
+      if (protection.crossed('limit_abuse', hits)) {
+        await protection.trigger(user, 'limit_abuse');
+      }
       res.set('Retry-After', String(quota.retryAfterSec));
       return res.status(429).json({
         error: `Usage limit reached: ${quota.limit} (${quota.max}) for your ${quota.level === 'org' ? 'organization' : 'account'}.`,

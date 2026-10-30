@@ -80,6 +80,11 @@
         </div>
       </div>
 
+      <div id="lock-banner" class="callout danger hidden">
+        <strong>Your API key was locked automatically.</strong>
+        <span id="lock-text"></span>
+      </div>
+
       <div id="revoked-banner" class="callout danger hidden">
         <strong>Your API key was revoked.</strong>
         <span id="revoked-text"></span>
@@ -124,6 +129,31 @@
             <p id="session-count" class="muted small"></p>
             <button id="logout-all-btn" class="ghost small danger">Log out everywhere</button>
           </div>
+        </section>
+
+        <!-- COMPROMISE PROTECTION -->
+        <section class="card span-2">
+          <div class="card-head">
+            <h2>If your key looks stolen</h2>
+            <span id="protection-owner" class="muted small"></span>
+          </div>
+          <p class="muted small">
+            Repeated use from unapproved devices, a key spreading to many devices,
+            wrong passwords while viewing it, or heavy limit abuse trigger this
+            automatically. You'll see an alert either way.
+          </p>
+          <form id="protection-form" class="row">
+            <select id="protection-action">
+              <option value="disable">Disable the key (reversible by an admin)</option>
+              <option value="rotate">Rotate: revoke the old key for good</option>
+              <option value="alert">Alert only</option>
+            </select>
+            <input type="password" id="protection-password" placeholder="Current password"
+                   autocomplete="current-password" maxlength="256" required />
+            <button type="submit" class="ghost small">Save</button>
+          </form>
+          <p id="protection-current" class="small"></p>
+          <p id="protection-error" class="error"></p>
         </section>
 
         <!-- PLAN & USAGE -->

@@ -9,6 +9,8 @@
  *   limit_exceeded  — a usage limit blocked a request
  *   key_revoked     — an admin revoked the user's key
  *   reveal_lockout  — too many wrong passwords while viewing the key
+ *   unapproved_device_use — key used from a device the owner never approved
+ *   auto_protect    — key automatically disabled/rotated (see protection.js)
  *
  * Noisy types are de-duplicated per user per day via `dedupeKey`.
  */
@@ -30,7 +32,8 @@ async function init(db) {
 
 /**
  * Record an alert. `daily: true` collapses repeats of the same type for the
- * same user within a UTC day into one alert (with a counter).
+ * same user within a UTC day into one alert (with a counter). Returns the
+ * alert's current count.
  */
 async function raise(type, user, { detail = '', ip = null, daily = false } = {}) {
   const now = new Date();
@@ -44,16 +47,16 @@ async function raise(type, user, { detail = '', ip = null, daily = false } = {})
   };
   if (daily) {
     const dedupeKey = `${type}:${user.id}:${now.toISOString().slice(0, 10)}`;
-    await alerts.updateOne(
+    const doc = await alerts.findOneAndUpdate(
       { dedupeKey },
       {
         $setOnInsert: { ...base, publicId: newId(), createdAt: now, resolvedAt: null, dedupeKey },
         $inc: { count: 1 },
         $set: { lastAt: now },
       },
-      { upsert: true }
+      { upsert: true, returnDocument: 'after' }
     );
-    return;
+    return doc.count;
   }
   await alerts.insertOne({
     ...base,
@@ -63,6 +66,7 @@ async function raise(type, user, { detail = '', ip = null, daily = false } = {})
     count: 1,
     resolvedAt: null,
   });
+  return 1;
 }
 
 function newId() {

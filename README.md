@@ -65,6 +65,7 @@ their generated passwords **once**. You can set them instead with
 | **Org master key** | For management only. It works only from an org admin's approved device while that admin is logged in. Used with `org_client.py`. |
 | **Scopes** | Each message is classified as `general`, `math`, `text`, `coding`, `cyber`, `design` or `data`, and is allowed only if it's within the key's scopes. |
 | **Usage limits** | Requests per minute, day and month; tokens per day and month; daily caps per category. Set per user and per org pool, by admins only. |
+| **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 3+ new devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
 
@@ -77,6 +78,8 @@ python3 org_client.py set-policy 7 --scopes general,coding --limit requestsPerDa
 python3 org_client.py org-policy --limit requestsPerDay=5000
 python3 org_client.py alerts
 python3 org_client.py revoke 7
+python3 org_client.py protection rotate     # alert | disable | rotate on compromise
+python3 org_client.py approve-regen 7       # allow a locked member to regenerate
 ```
 
 ## API
@@ -89,7 +92,8 @@ rejected.
 | POST | `/auth/signup` · `/auth/login` · `/auth/logout` · `/auth/logout-all` | — / session | Account and sessions |
 | GET | `/auth/me` | session | Dashboard data |
 | POST | `/auth/reveal-key` | session + password | View your current key (lockout + quota) |
-| POST | `/auth/rotate-key` | session + password | New API key; old one dies |
+| POST | `/auth/rotate-key` | session + password | New API key; old one dies (locked org members need approval) |
+| POST | `/auth/protection` | session + password | Personal accounts: action on compromise |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
 | GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}` |
@@ -118,6 +122,7 @@ db.js            MongoDB data layer (users, orgs, devices, hashed keys)
 keyVault.js      AES-256-GCM encryption for viewable API keys
 policy.js        Categories, scope + limit validation
 usage.js         Usage metering and limit checks
+protection.js    Automatic disable/rotate on compromise signals
 alerts.js        Security alerts
 security.js      CSP headers, input validation
 rateLimit.js     Per-IP rate limiter
@@ -127,12 +132,21 @@ client.py        Shell client
 org_client.py    Org management CLI
 ```
 
+## Scope notes
+
+- **Email verification is not implemented yet.** It was left out on purpose to
+  keep costs down (no mail provider) and the test scope small while the core
+  works. Accounts are created without verifying the address, and recovery
+  goes through passwords and admins. It's planned for **M3** (see below).
+- The in-memory IP rate limiter is per process; shared limits are planned for
+  M2.
+
 ## Roadmap
 
 ```mermaid
 flowchart LR
     M1["🤖 M1<br/>LLM integration"] --> M2["📈 M2<br/>Shared rate limits<br/>and scaling"]
-    M2 --> M3["✉️ M3<br/>Email verification<br/>and password reset"]
+    M2 --> M3["✉️ M3<br/>Email verification<br/>(near future)"]
     M3 --> M4["🔔 M4<br/>Alert webhooks<br/>and audit log"]
     M4 --> M5["🏢 M5<br/>SSO for orgs"]
     M5 --> M6["📦 M6<br/>Docker and CI"]
@@ -143,7 +157,7 @@ flowchart LR
 |-----------|------|------------------|--------|
 | **M1 — LLM integration** | Answer what the local engine can't | LLM fallback behind the existing checks; per-category model routing (coding, cyber, design…); real token metering from the model's usage counts; prompt caching; scope-aware system prompts | 🔜 Next |
 | **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | 📋 Planned |
-| **M3 — Account recovery** | Production-ready accounts | Email verification at signup; password reset; key-revoked notifications to the owner | 📋 Planned |
+| **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | 📋 Planned · near future |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |
 | **M5 — SSO** | Enterprise onboarding | OIDC/SAML login per org; automatic member provisioning | 📋 Planned |
 | **M6 — Packaging** | Easy deployment | Docker Compose (app + MongoDB); automated test suite in CI | 📋 Planned |

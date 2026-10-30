@@ -17,6 +17,7 @@
 
 const express = require('express');
 const policyLib = require('./policy');
+const { ACTIONS: PROTECTION_ACTIONS, DEFAULT_ACTION } = require('./protection');
 
 const isId = (v) => /^\d{1,9}$/.test(String(v));
 const PUBLIC_ID_RE = /^[0-9a-f]{16}$/;
@@ -58,6 +59,8 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       apiKeyPrefix: u.apiKeyPrefix || null, // never the key itself
       keyEnabled: !!u.keyEnabled,
       keyRevoked: !!u.keyRevoked,
+      keyLock: u.keyLock || null,
+      protection: (u.protection && u.protection.action) || DEFAULT_ACTION, // personal accounts
       policy: u.policy,
       activeSessions: await countActiveSessions(u.id),
       usage: await usage.summary(`u:${u.id}`),
@@ -71,6 +74,7 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       masterKeyPrefix: o.masterKeyPrefix,
       policy: o.policy,
       memberDefaults: o.memberDefaults,
+      protection: (o.protection && o.protection.action) || DEFAULT_ACTION,
       usage: await usage.summary(`o:${o.id}`),
     };
   }
@@ -130,7 +134,50 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
     res.json({ ok: true, sessionsEnded: deletedCount });
   }));
 
+  // --- compromise recovery ------------------------------------------------------
+  // Allow a member whose key was auto-locked to generate a new one (they still
+  // confirm with their own password; the admin never sees the key).
+  router.post('/users/:id/approve-regeneration', withTarget, wrap(async (req, res) => {
+    if (!req.target.keyLock) return res.status(400).json({ error: 'This key is not locked.' });
+    await db.approveRegeneration(req.target.id);
+    res.json({ ok: true });
+  }));
+
+  // False alarm: lift a 'disable' lock so the same key works again. A
+  // 'rotate' lock can't be undone — the old key is gone for good.
+  router.post('/users/:id/unlock', withTarget, wrap(async (req, res) => {
+    const lock = req.target.keyLock;
+    if (!lock) return res.status(400).json({ error: 'This key is not locked.' });
+    if (lock.action !== 'disable') {
+      return res.status(400).json({ error: 'The old key was rotated and cannot be restored; approve regeneration instead.' });
+    }
+    await db.setKeyLock(req.target.id, null);
+    res.json({ ok: true });
+  }));
+
+  // Automatic response for a personal account (org members follow their org).
+  router.post('/users/:id/protection', withTarget, wrap(async (req, res) => {
+    const { action } = req.body || {};
+    if (!PROTECTION_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `action must be one of: ${PROTECTION_ACTIONS.join(', ')}.` });
+    }
+    if (await db.getOrg(req.target.orgId)) return res.status(400).json({ error: 'Org members follow their org setting.' });
+    await db.setProtection(req.target.id, action);
+    res.json({ userId: req.target.id, action });
+  }));
+
   // --- org controls ----------------------------------------------------------
+  router.post('/orgs/:orgId/protection', wrap(async (req, res) => {
+    const { orgId } = req.params;
+    if (!isId(orgId) || !canManageOrg(req.actor, orgId)) return res.status(404).json({ error: 'Org not found.' });
+    const { action } = req.body || {};
+    if (!PROTECTION_ACTIONS.includes(action)) {
+      return res.status(400).json({ error: `action must be one of: ${PROTECTION_ACTIONS.join(', ')}.` });
+    }
+    await db.setOrgPolicy(orgId, 'protection', { action });
+    res.json({ orgId: Number(orgId), action });
+  }));
+
   router.post('/orgs/:orgId/policy', wrap(async (req, res) => {
     const { orgId } = req.params;
     if (!isId(orgId) || !canManageOrg(req.actor, orgId)) return res.status(404).json({ error: 'Org not found.' });
