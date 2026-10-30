@@ -16,6 +16,7 @@ Requires the `requests` library:  pip install requests
 """
 
 import argparse
+import re
 import sys
 import time
 import webbrowser
@@ -24,6 +25,18 @@ try:
     import requests
 except ImportError:
     sys.exit("This client needs the 'requests' library:  pip install requests")
+
+
+# Output encoding for the terminal: server-supplied text (replies echo user
+# input) must not be able to inject ANSI/OSC escape sequences that rewrite the
+# screen, retitle the window, or plant clickable links. Strip C0/C1 control
+# characters (keeping newline and tab) before printing anything from the server.
+_CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def safe(value):
+    """Render a server-supplied value as inert terminal text."""
+    return _CONTROL_CHARS.sub("", str(value))
 
 
 def check_session(base, api_key):
@@ -47,7 +60,7 @@ def wait_for_session(base, api_key):
         return False
 
     if status.get("active"):
-        who = status.get("email", "this account")
+        who = safe(status.get("email", "this account"))
         print(f"✓ Active session found for {who}.")
         return True
 
@@ -73,7 +86,7 @@ def wait_for_session(base, api_key):
             print("\n✗ This API key was disabled by an admin.")
             return False
         if status.get("active"):
-            who = status.get("email", "this account")
+            who = safe(status.get("email", "this account"))
             print(f"\n✓ Session active for {who}.")
             return True
 
@@ -98,12 +111,12 @@ def send_message(base, api_key, message):
 
     if r.status_code == 200:
         print("\n── Response ──────────────────────────────")
-        print(data.get("reply", data))
-        print(f"  (processed at {data.get('processedAt', 'n/a')})")
+        print(safe(data.get("reply", data)))
+        print(f"  (processed at {safe(data.get('processedAt', 'n/a'))})")
     elif r.status_code == 401:
-        print(f"\n401 Unauthorized: {data.get('error', 'No active session found')}")
+        print(f"\n401 Unauthorized: {safe(data.get('error', 'No active session found'))}")
     else:
-        print(f"\n{r.status_code}: {data.get('error', r.text)}")
+        print(f"\n{r.status_code}: {safe(data.get('error', r.text))}")
 
 
 def main():

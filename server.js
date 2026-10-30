@@ -21,6 +21,7 @@ const MongoStore = require('connect-mongo').default;
 
 const db = require('./db');
 const engine = require('./engine');
+const security = require('./security');
 
 // Optional LLM fallback for messages the local engine can't confidently
 // answer. Disabled unless you wire one up (kept null here so the demo makes
@@ -36,7 +37,13 @@ async function main() {
   await db.connect();
 
   const app = express();
-  app.use(express.json());
+  app.disable('x-powered-by');
+  // Output encoding for every JSON response: <, >, & are emitted as \u003c,
+  // \u003e, \u0026. Values decode identically, but a response can never be
+  // parsed as markup even if it ends up somewhere it shouldn't.
+  app.set('json escape', true);
+  app.use(security.securityHeaders);
+  app.use(express.json({ limit: '10kb' }));
 
   // --- Session store -----------------------------------------------------
   // connect-mongo persists sessions in the SAME "AAP" database (collection
@@ -98,8 +105,6 @@ async function main() {
   const wrap = (fn) => (req, res, next) =>
     Promise.resolve(fn(req, res, next)).catch(next);
 
-  const isNonEmptyString = (v) => typeof v === 'string' && v.length > 0;
-  const EMAIL_RE = /^[^\s@<>"'&]+@[^\s@<>"'&]+\.[^\s@<>"'&]+$/;
 
   // Start a fresh session ID on authentication (prevents session fixation).
   function startSession(req, userId) {
@@ -139,15 +144,18 @@ async function main() {
 
   app.post('/auth/signup', wrap(async (req, res) => {
     const { email, password } = req.body || {};
-    if (!isNonEmptyString(email) || !isNonEmptyString(password)) {
-      return res.status(400).json({ error: 'Email and password are required.' });
+    const cleanEmail = security.cleanEmail(email);
+    if (!cleanEmail.ok) {
+      return res.status(400).json({ error: cleanEmail.error });
     }
-    if (!EMAIL_RE.test(email.trim()) || email.length > 254) {
-      return res.status(400).json({ error: 'Please enter a valid email address.' });
+    if (!security.isPassword(password)) {
+      return res.status(400).json({
+        error: `Password is required (max ${security.LIMITS.password} characters).`,
+      });
     }
     let user;
     try {
-      user = await db.createUser(email, password);
+      user = await db.createUser(cleanEmail.value, password);
     } catch (e) {
       return res.status(409).json({ error: e.message });
     }
@@ -157,10 +165,11 @@ async function main() {
 
   app.post('/auth/login', wrap(async (req, res) => {
     const { email, password } = req.body || {};
-    if (!isNonEmptyString(email) || !isNonEmptyString(password)) {
+    const cleanEmail = security.cleanEmail(email);
+    if (!cleanEmail.ok || !security.isPassword(password)) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
-    const user = await db.getUserByEmail(email);
+    const user = await db.getUserByEmail(cleanEmail.value);
     if (!user || !db.verifyPassword(password, user.passwordHash)) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
@@ -197,10 +206,14 @@ async function main() {
   // cookie). It only reveals a boolean (+ masked email), never the key.
   app.get('/auth/session-status', wrap(async (req, res) => {
     const apiKey = req.query.api_key;
-    // Must be a plain string — `?api_key[$ne]=x` parses to an object and
-    // would otherwise be passed to MongoDB as a query operator.
-    if (!isNonEmptyString(apiKey)) {
+    // Must be a well-formed key string — `?api_key[$ne]=x` parses to an
+    // object and would otherwise be passed to MongoDB as a query operator.
+    if (apiKey === undefined) {
       return res.status(400).json({ error: 'api_key query param required' });
+    }
+    if (!security.isApiKey(apiKey)) {
+      // Same answer as an unknown key — don't reveal what's malformed.
+      return res.json({ active: false });
     }
     const user = await db.getUserByApiKey(apiKey);
     if (!user) {
@@ -221,14 +234,19 @@ async function main() {
 
   app.post('/api/message', wrap(async (req, res) => {
     const { api_key, message } = req.body || {};
-    // Strings only: an object like {"$ne": null} would act as a MongoDB
-    // operator and match an arbitrary user's key.
-    if (!isNonEmptyString(api_key) || !isNonEmptyString(message)) {
-      return res.status(400).json({ error: 'api_key and message are required strings.' });
+    if (api_key === undefined || message === undefined) {
+      return res.status(400).json({ error: 'api_key and message are required.' });
+    }
+    const msg = security.cleanText(message, 'message', security.LIMITS.message);
+    if (!msg.ok) {
+      return res.status(400).json({ error: msg.error });
     }
 
-    // 1. Which user owns this key?
-    const user = await db.getUserByApiKey(api_key);
+    // 1. Which user owns this key? Only well-formed key strings reach the
+    // DB — an object like {"$ne": null} would act as a MongoDB operator.
+    const user = security.isApiKey(api_key)
+      ? await db.getUserByApiKey(api_key)
+      : null;
     if (!user) {
       return res.status(401).json({ error: 'Unauthorized: invalid API key' });
     }
@@ -247,7 +265,7 @@ async function main() {
     }
 
     // 4. Session is live → run the lightweight response engine.
-    const { reply, source } = await engine.generate(message, {
+    const { reply, source } = await engine.generate(msg.value, {
       llmFallback: llmFallback || undefined,
     });
     res.json({
@@ -299,6 +317,10 @@ async function main() {
   app.use((err, req, res, next) => {
     if (err.type === 'entity.parse.failed') {
       return res.status(400).json({ error: 'Malformed JSON body.' });
+    }
+    if (err.expose && err.status >= 400 && err.status < 500) {
+      // Client errors from body-parser (e.g. 413 body too large).
+      return res.status(err.status).json({ error: err.message });
     }
     console.error(err);
     res.status(500).json({ error: 'Internal server error' });

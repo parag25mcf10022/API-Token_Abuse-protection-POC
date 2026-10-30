@@ -135,3 +135,7 @@ th { color: var(--muted); font-weight: 600; }
 .badge { padding: 3px 8px; border-radius: 3px; font-size: 0.72rem; font-weight: 600; }
 .badge.on { background: #e6f4ea; color: var(--ok); }
 .badge.off { background: #fdecea; color: var(--bad); }
+
+.wrap.wide {
+  max-width: 760px;
+}

@@ -28,8 +28,10 @@ cookie — the browser session is what keeps the key alive.
 | `server.js`          | Express server: web app, API server, and auth bridge        |
 | `engine.js`          | Lightweight response engine for `/api/message` (no LLM)     |
 | `db.js`              | MongoDB data layer — database **AAP** (users + counters)    |
+| `security.js`        | XSS hardening: security headers (CSP) + input validation    |
 | `public/index.html`  | Login / signup + dashboard (shows the user's API key)       |
 | `public/admin.html`  | Admin panel — toggle any user's key on/off (bonus)          |
+| `public/admin.js`    | Admin panel logic                                           |
 | `public/app.js`      | Frontend logic                                              |
 | `public/styles.css`  | Styling                                                     |
 | `client.py`          | Python shell client (the bridge)                            |
@@ -181,7 +183,32 @@ independent of who is calling, and the state survives restarts.
 - `api_key` (and other inputs) must be strings, so MongoDB query operators like
   `{"$ne": null}` can't be injected to match someone else's key.
 - The session ID is regenerated on login/signup (no session fixation).
-- The admin panel renders user data via `textContent`, never `innerHTML`.
+
+### XSS protection
+
+Defense in depth — validate input, encode output, and contain anything that
+slips through:
+
+- **Input validation** (`security.js`): every field is type-checked and
+  length-capped (email 254, password 256, message 2000; JSON bodies 10 KB).
+  Text is Unicode-normalized and rejected if it contains control or bidi
+  override characters. Emails must match a strict allow-list (no quotes,
+  angle brackets, `&`, spaces). API keys must match the exact `ak_` + 48-hex
+  format before they ever reach the database. Free text is *not* run through
+  a "strip `<script>`" filter — those are bypassable and corrupt real data;
+  output encoding is what makes it safe.
+- **Output encoding, per context:**
+  - JSON: Express `json escape` emits `<`, `>`, `&` as `\u003c`, `\u003e`,
+    `\u0026`, so no API response can be parsed as markup.
+  - HTML: the frontend renders all data with `textContent` / DOM APIs — there
+    are no `innerHTML`-style sinks.
+  - Terminal: `client.py` strips control characters from server text so
+    replies can't inject ANSI/OSC escape sequences.
+- **Containment headers:** a strict Content-Security-Policy (`script-src
+  'self'`, no inline script or style, `object-src 'none'`, `frame-ancestors
+  'none'`) with **Trusted Types** enforced, so string-to-HTML sinks throw even
+  if one is added later. Plus `X-Content-Type-Options: nosniff`,
+  `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`.
 - This is a **demo**: it uses an unauthenticated local MongoDB, a hard-coded
   session secret, and HTTP. For production: secured MongoDB (auth + TLS),
   env-provided secret, HTTPS, rate limiting, and CSRF protection on the auth

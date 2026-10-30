@@ -21,10 +21,10 @@
       </div>
       <form id="auth-form">
         <label>Email
-          <input type="email" id="email" autocomplete="username" required />
+          <input type="email" id="email" autocomplete="username" maxlength="254" required />
         </label>
         <label>Password
-          <input type="password" id="password" autocomplete="current-password" required />
+          <input type="password" id="password" autocomplete="current-password" maxlength="256" required />
         </label>
         <button type="submit" id="auth-submit" class="primary">Log in</button>
         <p id="auth-error" class="error"></p>
