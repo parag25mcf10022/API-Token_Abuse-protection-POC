@@ -76,7 +76,9 @@ Seeded accounts:
 - `admin@example.com` / `admin123` (admin)
 - `user@example.com` / `user123`
 
-You can also sign up a fresh account on the page.
+You can also sign up a fresh account on the page. **New accounts start with
+their API key disabled**: an admin has to enable it in the admin panel
+(`/admin.html`) before the key works. The seeded accounts are pre-approved.
 
 ### 2. Open the web app
 
@@ -101,7 +103,9 @@ python3 client.py
 ## Try the security demo
 
 1. Log in on the web app, copy your key, send a message via `client.py`. ✅ Works.
-2. **Log out** in the browser.
+2. **Log out** in the browser. (If the same account is logged in in another
+   browser too, that session keeps the key alive. Use **Log out everywhere**
+   on the dashboard to end them all at once.)
 3. Run `client.py` again with the *same key*. ❌ `401 Unauthorized: No active
    session found`. The key alone is worthless.
 
@@ -111,7 +115,8 @@ python3 client.py
 |--------|-------------------------------|----------------------------------------------------|
 | POST   | `/auth/signup`                | Create account, start session, return API key      |
 | POST   | `/auth/login`                 | Log in, start session                              |
-| POST   | `/auth/logout`                | Destroy session (key immediately stops working)    |
+| POST   | `/auth/logout`                | End this browser's session                         |
+| POST   | `/auth/logout-all`            | End every session for the account (key stops now)  |
 | GET    | `/auth/me`                    | Current user info (dashboard)                      |
 | GET    | `/auth/session-status?api_key=` | Is the key's owner logged in? (polled by the CLI) |
 | POST   | `/api/message`                | **Protected** — honored only with a live session   |
@@ -121,9 +126,10 @@ python3 client.py
 ### `POST /api/message` validation order
 
 1. Look up which user owns `api_key` → `401` if unknown.
-2. Is the key enabled (not admin-disabled)? → `403` if disabled.
+2. Has an admin enabled the key? → `403` if not. (New signups start disabled.)
 3. **Does that user have an active session in the store?** → `401 No active
-   session found` if not.
+   session found` if not. Any live session for the account counts, so the key
+   works while the owner is logged in in at least one browser.
 4. All good → process the message and return a reply.
 
 ## The response engine (`engine.js`)

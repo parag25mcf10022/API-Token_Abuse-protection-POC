@@ -100,6 +100,14 @@ async function main() {
     return !!doc;
   }
 
+  /** How many live sessions (browsers/devices) the account currently has. */
+  function countActiveSessions(userId) {
+    return sessionsCol.countDocuments({
+      'session.userId': userId,
+      expires: { $gt: new Date() },
+    });
+  }
+
   // Express 4 doesn't catch rejected promises from async handlers — the
   // request would hang. Route errors to the error middleware instead.
   const wrap = (fn) => (req, res, next) =>
@@ -178,12 +186,23 @@ async function main() {
   }));
 
   app.post('/auth/logout', (req, res) => {
-    // Destroying the session immediately makes the user's API key unusable.
+    // Ends THIS browser's session. The key stops working once no other
+    // session for the account is live (see /auth/logout-all).
     req.session.destroy(() => {
       res.clearCookie('aap.sid');
       res.json({ ok: true });
     });
   });
+
+  // Ends EVERY session for the account (all browsers/devices), so the API
+  // key stops working immediately.
+  app.post('/auth/logout-all', requireLogin, wrap(async (req, res) => {
+    const { deletedCount } = await sessionsCol.deleteMany({
+      'session.userId': req.session.userId,
+    });
+    res.clearCookie('aap.sid');
+    res.json({ ok: true, sessionsEnded: deletedCount });
+  }));
 
   // Used by the dashboard to load the current user's info.
   app.get('/auth/me', requireLogin, wrap(async (req, res) => {
@@ -194,6 +213,7 @@ async function main() {
       apiKey: user.apiKey,
       keyEnabled: user.keyEnabled,
       isAdmin: user.isAdmin,
+      activeSessions: await countActiveSessions(user.id),
     });
   }));
 
@@ -327,8 +347,9 @@ async function main() {
   });
 
   // --- Seed a demo admin + a normal user (idempotent) ---------------------
-  await seedIfMissing('admin@example.com', 'admin123', { isAdmin: true });
-  await seedIfMissing('user@example.com', 'user123');
+  // Demo accounts are pre-approved; real signups need an admin to enable them.
+  await seedIfMissing('admin@example.com', 'admin123', { isAdmin: true, keyEnabled: true });
+  await seedIfMissing('user@example.com', 'user123', { keyEnabled: true });
 
   app.listen(PORT, () => {
     console.log(`\nAAP demo running → http://localhost:${PORT}`);

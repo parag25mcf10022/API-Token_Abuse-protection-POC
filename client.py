@@ -66,7 +66,7 @@ def wait_for_session(base, api_key):
 
     # Not active — explain why and send the user to log in.
     if status.get("keyEnabled") is False:
-        print("✗ This API key has been DISABLED by an admin. Nothing to do.")
+        print("✗ This API key is not enabled. An admin must enable it before it can be used.")
         return False
 
     print("No active session. Please log in at " + base)
@@ -83,7 +83,7 @@ def wait_for_session(base, api_key):
         if status is None:
             continue
         if status.get("keyEnabled") is False:
-            print("\n✗ This API key was disabled by an admin.")
+            print("\n✗ This API key is not enabled. An admin must enable it before it can be used.")
             return False
         if status.get("active"):
             who = safe(status.get("email", "this account"))

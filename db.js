@@ -79,7 +79,8 @@ async function nextId() {
   return doc.seq;
 }
 
-async function createUser(email, password, { isAdmin = false } = {}) {
+// New keys start DISABLED: an admin must approve (enable) them before use.
+async function createUser(email, password, { isAdmin = false, keyEnabled = false } = {}) {
   email = email.trim().toLowerCase();
   if (await users.findOne({ email })) {
     throw new Error('An account with that email already exists.');
@@ -90,7 +91,7 @@ async function createUser(email, password, { isAdmin = false } = {}) {
     email,
     passwordHash: hashPassword(password),
     apiKey: generateApiKey(),
-    keyEnabled: true, // admin can toggle this off
+    keyEnabled: !!keyEnabled, // admin toggles this on/off
     isAdmin,
     createdAt: new Date().toISOString(),
   };
