@@ -183,6 +183,11 @@ async function main() {
     messageIp: createLimiter({ windowMs: MIN, max: 120 }),
     // Per-account limits are admin-configurable policies (see usage.js).
     masterIp: createLimiter({ windowMs: MIN, max: 60 }),
+    // Viewing a key: 3 wrong passwords per account → 15 min lockout; at most
+    // 10 successful views per account per hour; 20 attempts per IP / 15 min.
+    revealFail: createLimiter({ windowMs: 15 * MIN, max: 3 }),
+    revealOk: createLimiter({ windowMs: 60 * MIN, max: 10 }),
+    revealIp: createLimiter({ windowMs: 15 * MIN, max: 20 }),
   };
   const byIp = (req) => req.ip;
 
@@ -327,6 +332,52 @@ async function main() {
     });
   }));
 
+  // View the current key again. Requires the current password, inside a live
+  // session. Three wrong passwords lock viewing for 15 minutes, END this
+  // session (a hijacked session gets three guesses, then is logged out) and
+  // alert admins.
+  app.post('/auth/reveal-key', requireLogin, limit(limits.revealIp, byIp), wrap(async (req, res) => {
+    const userId = req.session.userId;
+    const lock = limits.revealFail.blocked(userId);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+
+    const user = await db.getUserById(userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    const { password } = req.body || {};
+    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+      limits.revealFail.hit(userId);
+      const now = limits.revealFail.blocked(userId);
+      if (now.blocked) {
+        await alerts.raise('reveal_lockout', user, {
+          detail: 'Too many wrong passwords while viewing the API key; session ended.',
+          ip: req.ip,
+        });
+        return req.session.destroy(() => {
+          res.clearCookie('aap.sid');
+          res.status(401).json({
+            error: 'Too many incorrect attempts. You have been logged out; key viewing is locked for 15 minutes.',
+            loggedOut: true,
+          });
+        });
+      }
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    limits.revealFail.reset(userId);
+
+    const apiKey = db.revealApiKey(user);
+    if (!apiKey) {
+      return res.status(404).json({
+        error: user.keyRevoked
+          ? 'You have no active key. Generate a new one.'
+          : 'This key was created before key viewing existed. Generate a new key to enable viewing.',
+      });
+    }
+    // Count only views that actually display a key.
+    const quota = limits.revealOk.hit(userId);
+    if (!quota.allowed) return tooMany(res, quota.retryAfterSec);
+    res.json({ apiKey });
+  }));
+
   // --- Device management (owner only, scoped to the session's user) -------
   const DEVICE_ID_RE = /^[0-9a-f]{16}$/;
 
@@ -354,7 +405,8 @@ async function main() {
     const org = await db.getOrg(user.orgId);
     res.json({
       email: user.email,
-      apiKeyPrefix: user.apiKeyPrefix, // full key is never shown again
+      apiKeyPrefix: user.apiKeyPrefix, // full key only via /auth/reveal-key
+      keyRevealable: !!user.apiKeyEnc && !user.keyRevoked,
       keyEnabled: user.keyEnabled,
       keyRevoked: !!user.keyRevoked, // admin revoked it → owner must generate a new one
       isAdmin: user.isAdmin,

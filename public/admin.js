@@ -21,6 +21,7 @@ const ALERT_TONES = {
   login_lockout: 'off',
   limit_exceeded: 'warn',
   key_revoked: 'off',
+  reveal_lockout: 'off',
 };
 
 const ALERT_LABELS = {
@@ -29,6 +30,7 @@ const ALERT_LABELS = {
   login_lockout: 'Login lockout',
   limit_exceeded: 'Limit exceeded',
   key_revoked: 'Key revoked',
+  reveal_lockout: 'Key-view lockout',
 };
 
 async function api(path, opts = {}) {

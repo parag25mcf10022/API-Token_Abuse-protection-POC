@@ -13,6 +13,7 @@
 const crypto = require('crypto');
 const { MongoClient } = require('mongodb');
 const { DEFAULT_USER_POLICY } = require('./policy');
+const keyVault = require('./keyVault');
 
 const MONGO_URL = process.env.MONGO_URL || 'mongodb://localhost:27017';
 const DB_NAME = process.env.MONGO_DB || 'AAP';
@@ -181,6 +182,7 @@ async function createUser(
     passwordHash: hashPassword(password),
     apiKeyHash: hashApiKey(apiKey),
     apiKeyPrefix: keyPrefix(apiKey),
+    apiKeyEnc: keyVault.encrypt(apiKey, id), // for password-gated viewing
     keyEnabled: !!keyEnabled, // admin toggles this on/off
     keyRevoked: false,
     isAdmin,
@@ -198,7 +200,8 @@ async function createUser(
     }
     throw e;
   }
-  // Plaintext key is returned to the caller once (for display) — not stored.
+  // Plaintext key returned to the caller for display; stored only hashed +
+  // encrypted.
   return { ...user, apiKey };
 }
 
@@ -215,9 +218,18 @@ function getUserByApiKey(apiKey) {
 }
 
 /**
+ * Decrypt the user's current key for display, or null if there's nothing to
+ * show (revoked, or created before encrypted storage existed).
+ */
+function revealApiKey(user) {
+  if (!user || user.keyRevoked) return null;
+  return keyVault.decrypt(user.apiKeyEnc, user.id);
+}
+
+/**
  * Replace a user's API key. The old key stops working immediately. Returns
- * the new plaintext key (the only time it is available). Approval state
- * (keyEnabled) is kept, so rotating can't bypass an admin's decision.
+ * the new plaintext key. Approval state (keyEnabled) is kept, so rotating
+ * can't bypass an admin's decision.
  */
 async function rotateApiKey(userId) {
   const apiKey = generateApiKey();
@@ -227,6 +239,7 @@ async function rotateApiKey(userId) {
       $set: {
         apiKeyHash: hashApiKey(apiKey),
         apiKeyPrefix: keyPrefix(apiKey),
+        apiKeyEnc: keyVault.encrypt(apiKey, Number(userId)),
         keyRevoked: false,
       },
     }
@@ -342,6 +355,7 @@ async function revokeApiKey(userId) {
         apiKeyPrefix: null,
         keyRevoked: true,
       },
+      $unset: { apiKeyEnc: '' },
     }
   );
   return r.matchedCount === 1;
@@ -459,6 +473,7 @@ module.exports = {
   verifyPassword,
   DUMMY_HASH,
   rotateApiKey,
+  revealApiKey,
   revokeApiKey,
   noteLoginIp,
   setUserPolicy,

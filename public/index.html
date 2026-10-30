@@ -98,11 +98,13 @@
             <button id="copy-btn" class="ghost small hidden">Copy</button>
           </div>
           <p id="key-once" class="warn small hidden">
-            Copy this key now — it is stored only as a hash and won't be shown again.
+            Keep this key secret. You can view it again later with your password.
           </p>
+          <p id="key-timer" class="muted small hidden"></p>
           <form id="rotate-form" class="row">
             <input type="password" id="rotate-password" placeholder="Current password"
                    autocomplete="current-password" maxlength="256" required />
+            <button type="button" id="reveal-btn" class="ghost small">Show key</button>
             <button type="submit" class="ghost small">Generate new key</button>
           </form>
           <p id="rotate-error" class="error"></p>

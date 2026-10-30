@@ -8,6 +8,7 @@
  *   login_lockout   — too many failed logins for this account
  *   limit_exceeded  — a usage limit blocked a request
  *   key_revoked     — an admin revoked the user's key
+ *   reveal_lockout  — too many wrong passwords while viewing the key
  *
  * Noisy types are de-duplicated per user per day via `dedupeKey`.
  */

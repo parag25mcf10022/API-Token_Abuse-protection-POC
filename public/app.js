@@ -59,10 +59,10 @@ function showDashboard(user) {
   $('dash-view').classList.remove('hidden');
   $('topbar-user').classList.remove('hidden');
   $('dash-email').textContent = user.email;
-  // Only the non-secret prefix is ever available after creation.
-  $('api-key').textContent = `${user.apiKeyPrefix}${'•'.repeat(12)}`;
-  $('copy-btn').classList.add('hidden');
-  $('key-once').classList.add('hidden');
+  // Masked by default; the full key needs the password (Show key).
+  maskedKey = user.apiKeyPrefix ? `${user.apiKeyPrefix}${'•'.repeat(12)}` : '— no active key —';
+  hideKey();
+  $('reveal-btn').classList.toggle('hidden', !user.keyRevealable);
   $('key-state').textContent = user.keyEnabled
     ? 'Key is enabled.'
     : 'Not enabled yet — an admin must enable it.';
@@ -181,10 +181,33 @@ async function loadDevices() {
   }
 }
 
+// A revealed key is shown for a limited time, then masked again.
+const REVEAL_SECONDS = 30;
+let maskedKey = '';
+let hideTimer = null;
+
+function hideKey() {
+  clearInterval(hideTimer);
+  hideTimer = null;
+  $('api-key').textContent = maskedKey;
+  $('copy-btn').classList.add('hidden');
+  $('key-once').classList.add('hidden');
+  $('key-timer').classList.add('hidden');
+}
+
 function revealKey(key) {
+  clearInterval(hideTimer);
   $('api-key').textContent = key;
   $('copy-btn').classList.remove('hidden');
   $('key-once').classList.remove('hidden');
+  let left = REVEAL_SECONDS;
+  const tick = () => {
+    $('key-timer').textContent = `Hiding in ${left}s`;
+    $('key-timer').classList.remove('hidden');
+    if (left-- <= 0) hideKey();
+  };
+  tick();
+  hideTimer = setInterval(tick, 1000);
 }
 
 function setMode(next) {
@@ -228,6 +251,31 @@ $('rotate-form').onsubmit = async (e) => {
     return;
   }
   loadDashboard(data.apiKey);
+};
+
+$('reveal-btn').onclick = async () => {
+  $('rotate-error').textContent = '';
+  const password = $('rotate-password').value;
+  if (!password) {
+    $('rotate-error').textContent = 'Enter your current password to view the key.';
+    return;
+  }
+  const { ok, data } = await api('/auth/reveal-key', {
+    method: 'POST',
+    body: JSON.stringify({ password }),
+  });
+  $('rotate-password').value = '';
+  if (!ok) {
+    if (data.loggedOut) {
+      showAuth();
+      setMode('login');
+      $('auth-error').textContent = data.error;
+      return;
+    }
+    $('rotate-error').textContent = data.error || 'Could not show key.';
+    return;
+  }
+  revealKey(data.apiKey);
 };
 
 $('logout-btn').onclick = async () => {

@@ -44,8 +44,8 @@ On first boot the server creates a super admin and a demo user and prints
 their generated passwords **once**. You can set them instead with
 `ADMIN_PASSWORD` and `DEMO_USER_PASSWORD`.
 
-1. Log in at `http://localhost:3000` and click **Generate new key**. The key
-   is shown once.
+1. Log in at `http://localhost:3000` and click **Generate new key**. You can
+   view it again later with **Show key** and your password.
 2. Run the client and approve its pairing code on your dashboard:
    ```bash
    pip install requests
@@ -59,7 +59,8 @@ their generated passwords **once**. You can set them instead with
 |------|--------------|
 | **Session binding** | The key works only while its owner has a live browser session (30 min idle, 8 h max). Users can log out of one browser or of all browsers. |
 | **Device approval** | The CLI holds a private device token. New devices stay pending until the owner approves the pairing code. |
-| **Key handling** | Keys are stored as SHA-256 hashes and shown once. Owners can rotate them with their password. Keys travel only in headers. |
+| **Key handling** | Keys are checked by SHA-256 hash and stored encrypted (AES-256-GCM, with the encryption key outside the DB). Owners can **view** or **rotate** their key with their password. Keys travel only in headers. |
+| **Key viewing** | Needs a live session and the current password. 3 wrong passwords lock viewing for 15 minutes, end the session and alert admins. At most 10 views per hour. The key auto-hides after 30 seconds. |
 | **Organizations** | Super admin → org admins → members, each with their own key. |
 | **Org master key** | For management only. It works only from an org admin's approved device while that admin is logged in. Used with `org_client.py`. |
 | **Scopes** | Each message is classified as `general`, `math`, `text`, `coding`, `cyber`, `design` or `data`, and is allowed only if it's within the key's scopes. |
@@ -87,7 +88,8 @@ rejected.
 |--------|------|------|---------|
 | POST | `/auth/signup` · `/auth/login` · `/auth/logout` · `/auth/logout-all` | — / session | Account and sessions |
 | GET | `/auth/me` | session | Dashboard data |
-| POST | `/auth/rotate-key` | session + password | New API key, shown once |
+| POST | `/auth/reveal-key` | session + password | View your current key (lockout + quota) |
+| POST | `/auth/rotate-key` | session + password | New API key; old one dies |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
 | GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}` |
@@ -102,6 +104,7 @@ rejected.
 | `PORT` | `3000` | HTTP port |
 | `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `AAP` | Database |
 | `SESSION_SECRET` | generated, stored in DB | Cookie signing |
+| `KEY_ENCRYPTION_KEY` | generated in `.secrets/` (git-ignored) | 64-hex key that encrypts stored API keys |
 | `TRUST_PROXY` | unset | Set to `1` behind a TLS proxy |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / random | Seeded super admin |
 | `DEMO_USER_EMAIL` / `DEMO_USER_PASSWORD` | `user@example.com` / random | Seeded demo user |
@@ -112,6 +115,7 @@ rejected.
 server.js        Express app: auth, devices, /api/message, wiring
 adminRoutes.js   Admin / org API (session or master key)
 db.js            MongoDB data layer (users, orgs, devices, hashed keys)
+keyVault.js      AES-256-GCM encryption for viewable API keys
 policy.js        Categories, scope + limit validation
 usage.js         Usage metering and limit checks
 alerts.js        Security alerts

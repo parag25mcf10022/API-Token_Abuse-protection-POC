@@ -4,6 +4,18 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Added (key viewing)
+- **View your API key** (`POST /auth/reveal-key`) after re-entering your
+  password, in a live session:
+  - 3 wrong passwords lock viewing for 15 minutes, end the session, and raise
+    a `reveal_lockout` alert.
+  - At most 10 views per account per hour, plus a per-IP cap on attempts.
+  - The revealed key auto-hides after 30 seconds.
+- Keys are now stored encrypted (AES-256-GCM, bound to the user id) next to
+  the lookup hash. The encryption key comes from `KEY_ENCRYPTION_KEY` or
+  `.secrets/key-encryption.key` (mode 600, git-ignored), never MongoDB.
+  Keys created before this can't be viewed; generate a new one.
+
 ### Added
 - **Organizations:** a super admin creates orgs and assigns org admins and
   members. Org admins manage only their own org.
