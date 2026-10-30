@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AAP — Admin panel</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap" style="max-width: 760px;">
+    <header>
+      <h1>🛠️ Admin panel</h1>
+      <p class="sub">Toggle any user's API key on or off.</p>
+    </header>
+
+    <section class="card">
+      <div class="row between">
+        <a href="/" class="ghost small">← Back to dashboard</a>
+        <button id="refresh" class="ghost small">Refresh</button>
+      </div>
+      <p id="admin-error" class="error"></p>
+      <table>
+        <thead>
+          <tr>
+            <th>Email</th>
+            <th>Session</th>
+            <th>Key</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="users"></tbody>
+      </table>
+    </section>
+  </div>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+
+    async function load() {
+      const res = await fetch('/api/admin/users', { credentials: 'same-origin' });
+      if (res.status === 401) { location.href = '/'; return; }
+      if (res.status === 403) {
+        $('admin-error').textContent = 'You must be an admin to view this page.';
+        return;
+      }
+      const { users } = await res.json();
+      const tbody = $('users');
+      tbody.innerHTML = '';
+      for (const u of users) {
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+          <td>${u.email}${u.isAdmin ? ' <span class="badge on">admin</span>' : ''}</td>
+          <td>${u.hasActiveSession
+            ? '<span class="badge on">active</span>'
+            : '<span class="badge off">none</span>'}</td>
+          <td>${u.keyEnabled
+            ? '<span class="badge on">enabled</span>'
+            : '<span class="badge off">disabled</span>'}</td>
+          <td><button class="ghost small" data-id="${u.id}" data-next="${!u.keyEnabled}">
+            ${u.keyEnabled ? 'Disable' : 'Enable'}</button></td>`;
+        tbody.appendChild(tr);
+      }
+      tbody.querySelectorAll('button').forEach((btn) => {
+        btn.onclick = async () => {
+          await fetch('/api/admin/toggle-key', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            credentials: 'same-origin',
+            body: JSON.stringify({
+              userId: Number(btn.dataset.id),
+              enabled: btn.dataset.next === 'true',
+            }),
+          });
+          load();
+        };
+      });
+    }
+
+    $('refresh').onclick = load;
+    load();
+  </script>
+</body>
+</html>

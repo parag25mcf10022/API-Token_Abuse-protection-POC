@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>AAP — Account-Bound API Key Protection</title>
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>🔐 Account-Bound API Key Protection</h1>
+      <p class="sub">Your API key is useless without an active login here.</p>
+    </header>
+
+    <!-- AUTH CARD -->
+    <section id="auth-view" class="card hidden">
+      <div class="tabs">
+        <button id="tab-login" class="tab active">Log in</button>
+        <button id="tab-signup" class="tab">Sign up</button>
+      </div>
+      <form id="auth-form">
+        <label>Email
+          <input type="email" id="email" autocomplete="username" required />
+        </label>
+        <label>Password
+          <input type="password" id="password" autocomplete="current-password" required />
+        </label>
+        <button type="submit" id="auth-submit" class="primary">Log in</button>
+        <p id="auth-error" class="error"></p>
+      </form>
+      <p class="hint">
+        Demo accounts:<br />
+        <code>admin@example.com / admin123</code><br />
+        <code>user@example.com / user123</code>
+      </p>
+    </section>
+
+    <!-- DASHBOARD -->
+    <section id="dash-view" class="card hidden">
+      <div class="row between">
+        <div>
+          <p class="muted">Signed in as</p>
+          <h2 id="dash-email"></h2>
+        </div>
+        <button id="logout-btn" class="ghost">Log out</button>
+      </div>
+
+      <div class="keybox">
+        <p class="muted">Your API key</p>
+        <div class="row">
+          <code id="api-key" class="key"></code>
+          <button id="copy-btn" class="ghost small">Copy</button>
+        </div>
+        <p id="key-state" class="muted small"></p>
+      </div>
+
+      <div class="callout">
+        <strong>This session keeps your key alive.</strong>
+        While this browser is logged in, the shell client can use your key.
+        Log out and the very same key stops working — that's the whole idea.
+      </div>
+
+      <a id="admin-link" href="/admin.html" class="ghost hidden">Open admin panel →</a>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

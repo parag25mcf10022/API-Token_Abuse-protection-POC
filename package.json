@@ -1,0 +1,17 @@
+{
+  "name": "account-bound-api-protection",
+  "version": "1.0.0",
+  "description": "Account-Bound API Key Protection (AAP) demo — API keys are useless without an active authenticated browser session.",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "dependencies": {
+    "connect-mongo": "^6.0.0",
+    "express": "^4.19.2",
+    "express-session": "^1.18.0",
+    "mongodb": "^7.2.0"
+  }
+}
