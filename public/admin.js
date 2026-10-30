@@ -103,6 +103,11 @@ async function load() {
     : `Org admin — managing ${orgName(a.orgId)}.`;
   $('org-form').classList.toggle('hidden', a.kind !== 'super');
   const alertList = (await api('/api/admin/alerts')).data.alerts || [];
+  const engine = (await api('/auth/engine')).data || {};
+  $('engine-line').textContent = !engine.enabled
+    ? 'Engine: local only (LLM disabled on the server).'
+    : `Engine: ${engine.provider} · ${engine.model} — ${engine.reachable ? 'online' : 'offline, local fallback in use'}` +
+      (engine.missing && engine.missing.length ? ` · not installed: ${engine.missing.join(', ')}` : '');
   $('tile-users').textContent = state.users.length;
   $('tile-orgs').textContent = state.orgs.length;
   $('tile-alerts').textContent = alertList.length;
@@ -143,7 +148,8 @@ function describePolicy(p) {
   const l = p.limits || {};
   const parts = Object.keys(LIMIT_LABELS).filter((k) => Number.isInteger(l[k])).map((k) => `${LIMIT_LABELS[k]}: ${l[k]}`);
   const cats = Object.entries(l.categoryRequestsPerDay || {}).map(([c, v]) => `${c}: ${v}/day`);
-  return `Scopes: ${scopes}. Limits: ${[...parts, ...cats].join('; ') || 'unlimited'}.`;
+  const llmText = p.llm === false ? ' LLM: blocked.' : p.llm === true ? ' LLM: allowed.' : '';
+  return `Scopes: ${scopes}. Limits: ${[...parts, ...cats].join('; ') || 'unlimited'}.${llmText}`;
 }
 
 function renderOrgs() {
@@ -246,6 +252,7 @@ function openEditor(title, policy, save) {
   const l = p.limits || {};
   const cats = Object.keys(state.categories);
 
+  $('llm-access').value = p.llm === true ? 'allow' : p.llm === false ? 'block' : 'inherit';
   $('scope-all').checked = !Array.isArray(p.scopes);
   const scopeList = $('scope-list');
   scopeList.replaceChildren();
@@ -284,7 +291,9 @@ function readEditor() {
     if (input.name.startsWith('cat:')) limits.categoryRequestsPerDay[input.name.slice(4)] = v;
     else limits[input.name] = v;
   }
-  return { scopes, limits };
+  const access = $('llm-access').value;
+  const llm = access === 'allow' ? true : access === 'block' ? false : null;
+  return { scopes, llm, limits };
 }
 
 $('scope-all').onchange = syncScopeAll;

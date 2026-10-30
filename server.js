@@ -447,6 +447,7 @@ async function main() {
       // Read-only view of what admins configured for this key.
       org: org ? { id: org.id, name: org.name, role: user.orgRole, masterKeyPrefix: user.orgRole === 'admin' ? org.masterKeyPrefix : undefined } : null,
       scopes: policyLib.allowedScopes(user.policy, org && org.policy),
+      llmAllowed: llm.enabled() && policyLib.llmAllowed(user.policy, org && org.policy),
       limits: (user.policy && user.policy.limits) || {},
       usage: await usage.summary(`u:${user.id}`),
     });

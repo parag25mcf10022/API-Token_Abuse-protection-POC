@@ -4,6 +4,28 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Added (M1: LLM integration, in progress)
+- **Local LLM via Ollama** (`llm.js`), used only after every AAP check:
+  - Default model `llama3.2:3b`, with per-category routing through
+    `LLM_MODEL_<CATEGORY>`.
+  - Scope-aware system prompts; the cyber prompt is defensive only.
+  - Timeouts, and a fallback to local answers if the model is unavailable.
+- `/api/message` can **stream** (`stream: true`, NDJSON with the same output
+  escaping) and takes chat **history** for multi-turn conversations.
+- **Real token metering** from the model's counts. Local answers aren't
+  charged for history. Truncated replies are flagged.
+- Admin-only **LLM access** switch per user and org (allow, block, inherit).
+- `GET /api/usage` and `/api/engine` for the CLI; `/auth/engine` for the
+  dashboard.
+- **New shell client:**
+  - welcome panel, streamed markdown rendering, a status line per reply,
+  - slash commands (`/help /usage /model /device /clear /save /status
+    /exit`),
+  - one-shot `-p`, `--no-stream`, plain output when piped.
+- **Web UI:** engine status and today-by-category cards on the dashboard;
+  LLM access in the admin policy editor; engine line in the admin panel.
+- The device-spray signal now counts only unapproved devices.
+
 ### Added (compromise auto-response)
 - Keys are **automatically disabled or rotated** when they look compromised
   or abused:

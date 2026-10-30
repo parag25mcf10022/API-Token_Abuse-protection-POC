@@ -28,6 +28,7 @@
     <div class="page-head">
       <h1>Admin panel</h1>
       <p id="actor" class="sub"></p>
+      <p id="engine-line" class="muted small"></p>
     </div>
     <p id="admin-error" class="error"></p>
 
@@ -86,6 +87,14 @@
           <legend>Allowed content categories (scopes)</legend>
           <label class="check"><input type="checkbox" id="scope-all" /> No restriction (all categories)</label>
           <div id="scope-list"></div>
+        </fieldset>
+        <fieldset>
+          <legend>LLM access (cost control)</legend>
+          <select id="llm-access">
+            <option value="inherit">Inherit / allow (default)</option>
+            <option value="allow">Allow the LLM</option>
+            <option value="block">Block the LLM — local engine only</option>
+          </select>
         </fieldset>
         <fieldset>
           <legend>Usage limits</legend>

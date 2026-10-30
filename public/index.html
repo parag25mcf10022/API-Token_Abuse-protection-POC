@@ -172,6 +172,33 @@
           <p id="plan-limits" class="muted small"></p>
         </section>
 
+        <!-- ENGINE -->
+        <section class="card">
+          <div class="card-head">
+            <h2>Engine</h2>
+            <span id="engine-state" class="pill neutral">checking…</span>
+          </div>
+          <dl class="facts">
+            <dt>Provider</dt><dd id="engine-provider">—</dd>
+            <dt>Model</dt><dd id="engine-model">—</dd>
+            <dt>Your access</dt><dd id="engine-access">—</dd>
+          </dl>
+          <p class="muted small">
+            Simple commands and questions about this service are answered locally and
+            instantly. Everything else goes to the model, after every key, device, session,
+            scope and limit check has passed.
+          </p>
+        </section>
+
+        <!-- TODAY BY CATEGORY -->
+        <section class="card">
+          <div class="card-head">
+            <h2>Today by category</h2>
+          </div>
+          <div id="category-bars" class="catbars"></div>
+          <p id="category-empty" class="empty hidden">No requests yet today.</p>
+        </section>
+
         <!-- MASTER KEY (org admins) -->
         <section id="master-box" class="card span-2 hidden">
           <div class="card-head">

@@ -34,6 +34,8 @@ flowchart LR
 ## Quick start
 
 Requirements: Node.js 20.19+, MongoDB, and Python 3 with `requests` for the CLIs.
+Optional: [Ollama](https://ollama.com) with a model such as `llama3.2:3b` for LLM
+answers. Without it, the local engine still answers.
 
 ```bash
 npm install
@@ -51,7 +53,19 @@ their generated passwords **once**. You can set them instead with
    pip install requests
    AAP_API_KEY=ak_... python3 client.py
    ```
-3. Send messages. Log out in the browser and the key stops working.
+3. Chat. Replies stream in, with `/help` for commands. Log out in the browser and
+   the key stops working.
+
+```text
+› Show a tiny Express middleware that checks an X-API-Key header
+  ┌ javascript
+  │ const apiKeyMiddleware = (req, res, next) => { … }
+  └
+  ↳ coding · llm · llama3.2:3b · 655 tok · 7.0s
+```
+
+CLI extras: `/usage` (meters against your limits), `/model`, `/device`, `/clear`,
+`/save chat.md`, one-shot `python3 client.py -p "question"`, and `--no-stream`.
 
 ## Features
 
@@ -67,6 +81,7 @@ their generated passwords **once**. You can set them instead with
 | **Usage limits** | Requests per minute, day and month; tokens per day and month; daily caps per category. Set per user and per org pool, by admins only. |
 | **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 3+ new unapproved devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
+| **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
 
 ## Org management (master key)
@@ -97,7 +112,8 @@ rejected.
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
 | GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}` |
-| POST | `/api/message` | `X-API-Key`, `X-AAP-Device` | Protected endpoint |
+| POST | `/api/message` | `X-API-Key`, `X-AAP-Device` | Protected endpoint; `stream: true` for NDJSON, optional `history` |
+| GET | `/api/usage` · `/api/engine` | `X-API-Key`, `X-AAP-Device` | Your limits/usage · engine status |
 | * | `/api/admin/*` | admin session | Admin API |
 | * | `/api/org/*` | `X-AAP-Master-Key`, `X-AAP-Device` | Same admin API, scoped to the org |
 
@@ -110,6 +126,11 @@ rejected.
 | `SESSION_SECRET` | generated, stored in DB | Cookie signing |
 | `KEY_ENCRYPTION_KEY` | generated in `.secrets/` (git-ignored) | 64-hex key that encrypts stored API keys |
 | `TRUST_PROXY` | unset | Set to `1` behind a TLS proxy |
+| `LLM_PROVIDER` | `ollama` | `ollama` or `none` (local engine only) |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
+| `LLM_MODEL` | `llama3.2:3b` | Default model |
+| `LLM_MODEL_<CATEGORY>` | — | Per-category model, e.g. `LLM_MODEL_CODING=qwen2.5-coder:7b` |
+| `LLM_MAX_TOKENS` / `LLM_TIMEOUT_MS` | `1024` / `90000` | Reply cap and timeout |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / random | Seeded super admin |
 | `DEMO_USER_EMAIL` / `DEMO_USER_PASSWORD` | `user@example.com` / random | Seeded demo user |
 
@@ -126,7 +147,8 @@ protection.js    Automatic disable/rotate on compromise signals
 alerts.js        Security alerts
 security.js      CSP headers, input validation
 rateLimit.js     Per-IP rate limiter
-engine.js        Local response engine + content classifier
+engine.js        Response engine: rules, FAQ, LLM, content classifier
+llm.js           Ollama client: streaming, model routing, system prompts
 public/          Dashboard and admin panel (no inline scripts)
 client.py        Shell client
 org_client.py    Org management CLI
@@ -155,7 +177,7 @@ flowchart LR
 
 | Milestone | Goal | Key deliverables | Status |
 |-----------|------|------------------|--------|
-| **M1 — LLM integration** | Answer what the local engine can't | LLM fallback behind the existing checks; per-category model routing (coding, cyber, design…); real token metering from the model's usage counts; prompt caching; scope-aware system prompts | 🔜 Next |
+| **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ⏳ hosted providers (e.g. Claude) with prompt caching · ⏳ per-model cost tracking | 🚧 In progress |
 | **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | 📋 Planned |
 | **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | 📋 Planned · near future |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |

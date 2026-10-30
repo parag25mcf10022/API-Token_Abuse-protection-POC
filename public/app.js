@@ -158,6 +158,48 @@ function showDashboard(user) {
   }
 }
 
+// --- Engine status + per-category usage --------------------------------------
+async function loadEngine(user) {
+  const { ok, data } = await api('/auth/engine');
+  if (!ok) return;
+  if (!data.enabled) {
+    setPill('engine-state', 'Local only', 'neutral');
+    $('engine-provider').textContent = 'none (LLM disabled on the server)';
+    $('engine-model').textContent = '—';
+  } else {
+    setPill('engine-state', data.reachable ? 'Online' : 'Offline — local fallback', data.reachable ? 'ok' : 'warnpill');
+    $('engine-provider').textContent = data.provider;
+    const routes = Object.entries(data.routes || {}).map(([c, m]) => `${c}: ${m}`);
+    $('engine-model').textContent = data.model + (routes.length ? ` (${routes.join(', ')})` : '');
+  }
+  $('engine-access').textContent = user.llmAllowed
+    ? 'LLM allowed for your key'
+    : 'Local engine only (set by your admin)';
+}
+
+function renderCategories(byCategory) {
+  const box = $('category-bars');
+  box.replaceChildren();
+  const entries = Object.entries(byCategory || {}).sort((a, b) => b[1] - a[1]);
+  $('category-empty').classList.toggle('hidden', entries.length > 0);
+  const max = Math.max(1, ...entries.map(([, n]) => n));
+  for (const [cat, n] of entries) {
+    const row = document.createElement('div');
+    row.className = 'catbar';
+    const name = document.createElement('span');
+    name.textContent = cat;
+    const m = document.createElement('meter');
+    m.min = 0;
+    m.max = max;
+    m.value = n;
+    const count = document.createElement('span');
+    count.className = 'muted';
+    count.textContent = n.toLocaleString();
+    row.append(name, m, count);
+    box.append(row);
+  }
+}
+
 // The dashboard always renders from /auth/me so key state and session count
 // are authoritative. `newKey` (from signup/rotation) is shown once.
 async function loadDashboard(newKey) {
@@ -166,6 +208,8 @@ async function loadDashboard(newKey) {
   showDashboard(data);
   if (newKey) revealKey(newKey);
   loadDevices();
+  loadEngine(data);
+  renderCategories(data.usage.today.byCategory);
 }
 
 // --- Devices ----------------------------------------------------------------
