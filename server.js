@@ -23,6 +23,7 @@ const MongoStore = require('connect-mongo').default;
 const db = require('./db');
 const engine = require('./engine');
 const security = require('./security');
+const { createLimiter, limit, tooMany } = require('./rateLimit');
 
 // Optional LLM fallback for messages the local engine can't confidently
 // answer. Disabled unless you wire one up (kept null here so the demo makes
@@ -176,11 +177,27 @@ async function main() {
     return `${shown}${'*'.repeat(Math.max(1, name.length - 2))}@${domain}`;
   }
 
+  // --- Rate limits ---------------------------------------------------------
+  const MIN = 60 * 1000;
+  const limits = {
+    // Failed logins per (IP, email): blocks password guessing on one account.
+    loginFail: createLimiter({ windowMs: 15 * MIN, max: 5 }),
+    // All login attempts per IP: blocks spraying many accounts.
+    loginIp: createLimiter({ windowMs: 15 * MIN, max: 30 }),
+    signupIp: createLimiter({ windowMs: 60 * MIN, max: 5 }),
+    // CLI polls every 2 s (30/min); leave headroom.
+    statusIp: createLimiter({ windowMs: MIN, max: 60 }),
+    messageIp: createLimiter({ windowMs: MIN, max: 120 }),
+    // Per account, so a stolen key can't be hammered from many IPs.
+    messageUser: createLimiter({ windowMs: MIN, max: 60 }),
+  };
+  const byIp = (req) => req.ip;
+
   // =======================================================================
   // AUTH / WEB APP
   // =======================================================================
 
-  app.post('/auth/signup', wrap(async (req, res) => {
+  app.post('/auth/signup', limit(limits.signupIp, byIp), wrap(async (req, res) => {
     const { email, password } = req.body || {};
     const cleanEmail = security.cleanEmail(email);
     if (!cleanEmail.ok) {
@@ -201,16 +218,24 @@ async function main() {
     res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin });
   }));
 
-  app.post('/auth/login', wrap(async (req, res) => {
+  app.post('/auth/login', limit(limits.loginIp, byIp), wrap(async (req, res) => {
     const { email, password } = req.body || {};
     const cleanEmail = security.cleanEmail(email);
     if (!cleanEmail.ok || !security.isPassword(password)) {
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
+    // Locked out after too many failures — checked BEFORE the password, so a
+    // correct guess during the lockout is rejected too.
+    const failKey = `${req.ip}|${cleanEmail.value}`;
+    const lock = limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+
     const user = await db.getUserByEmail(cleanEmail.value);
     if (!user || !db.verifyPassword(password, user.passwordHash)) {
+      limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
+    limits.loginFail.reset(failKey);
     await startSession(req, user.id);
     res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin });
   }));
@@ -254,7 +279,7 @@ async function main() {
   // The CLI asks "is the account that owns this key currently logged in?"
   // It purposely does NOT require the caller to be logged in (the CLI has no
   // cookie). It only reveals a boolean (+ masked email), never the key.
-  app.get('/auth/session-status', wrap(async (req, res) => {
+  app.get('/auth/session-status', limit(limits.statusIp, byIp), wrap(async (req, res) => {
     const apiKey = req.query.api_key;
     // Must be a well-formed key string — `?api_key[$ne]=x` parses to an
     // object and would otherwise be passed to MongoDB as a query operator.
@@ -282,7 +307,7 @@ async function main() {
   // API SERVER — the account-bound, protected endpoint
   // =======================================================================
 
-  app.post('/api/message', wrap(async (req, res) => {
+  app.post('/api/message', limit(limits.messageIp, byIp), wrap(async (req, res) => {
     const { api_key, message } = req.body || {};
     if (api_key === undefined || message === undefined) {
       return res.status(400).json({ error: 'api_key and message are required.' });
@@ -305,6 +330,10 @@ async function main() {
     if (!user.keyEnabled) {
       return res.status(403).json({ error: 'Forbidden: API key is disabled' });
     }
+
+    // Per-account quota, regardless of which IP the key is used from.
+    const quota = limits.messageUser.hit(user.id);
+    if (!quota.allowed) return tooMany(res, quota.retryAfterSec);
 
     // 3. THE AAP CHECK — is the owner's browser session active right now?
     const active = await userHasActiveSession(user.id);
