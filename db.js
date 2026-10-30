@@ -48,6 +48,20 @@ async function close() {
   if (client) await client.close();
 }
 
+/**
+ * Return a persistent random secret (e.g. the session-signing key), creating
+ * it on first use. Stored in the "config" collection so it survives restarts
+ * without ever being hard-coded.
+ */
+async function getOrCreateSecret(name) {
+  const doc = await db.collection('config').findOneAndUpdate(
+    { _id: name },
+    { $setOnInsert: { value: crypto.randomBytes(32).toString('hex') } },
+    { upsert: true, returnDocument: 'after' }
+  );
+  return doc.value;
+}
+
 /** Hash a password with a random salt using scrypt. Format: salt:hash (hex). */
 function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -146,6 +160,7 @@ module.exports = {
   close,
   getClient,
   getDbName,
+  getOrCreateSecret,
   createUser,
   getUserById,
   getUserByEmail,

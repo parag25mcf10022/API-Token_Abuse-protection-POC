@@ -33,6 +33,10 @@ const llmFallback = null;
 
 const PORT = process.env.PORT || 3000;
 
+// Sessions expire after 30 min idle (sliding), and after 8 h no matter what.
+const SESSION_IDLE_MS = 30 * 60 * 1000;
+const SESSION_ABSOLUTE_MS = 8 * 60 * 60 * 1000;
+
 async function main() {
   // Connect to MongoDB ("AAP") before wiring up anything that needs it.
   await db.connect();
@@ -45,6 +49,9 @@ async function main() {
   app.set('json escape', true);
   app.use(security.securityHeaders);
   app.use(express.json({ limit: '10kb' }));
+  // Behind a TLS-terminating proxy, set TRUST_PROXY=1 so req.secure (and the
+  // Secure cookie flag) reflect the original HTTPS request.
+  if (process.env.TRUST_PROXY) app.set('trust proxy', 1);
 
   // --- Session store -----------------------------------------------------
   // connect-mongo persists sessions in the SAME "AAP" database (collection
@@ -56,7 +63,7 @@ async function main() {
     client: db.getClient(),
     dbName: db.getDbName(),
     collectionName: 'sessions',
-    ttl: 30 * 60, // seconds — matches the cookie maxAge below
+    ttl: SESSION_IDLE_MS / 1000, // seconds — matches the cookie maxAge below
     // Store sessions as real sub-documents (not JSON strings) so we can query
     // and index `session.userId` directly instead of scanning every session.
     stringify: false,
@@ -69,17 +76,34 @@ async function main() {
   app.use(
     session({
       name: 'aap.sid',
-      secret: process.env.SESSION_SECRET || 'demo-only-not-secret',
+      // From SESSION_SECRET, or a random secret generated once and persisted
+      // in the DB — never a hard-coded value.
+      secret: process.env.SESSION_SECRET || (await db.getOrCreateSecret('sessionSecret')),
       store: sessionStore,
       resave: false,
       saveUninitialized: false,
+      // Re-issue the cookie on every response so the browser's expiry slides
+      // in step with the server-side session (no zombie sessions that the
+      // server still honors after the browser has dropped the cookie).
+      rolling: true,
       cookie: {
         httpOnly: true, // not readable from JS — mitigates XSS token theft
         sameSite: 'lax',
-        maxAge: 1000 * 60 * 30, // 30 min
+        secure: 'auto', // Secure flag whenever the request arrived over HTTPS
+        maxAge: SESSION_IDLE_MS,
       },
     })
   );
+
+  // Enforce the absolute lifetime: a session older than 8 h is destroyed even
+  // if it has been continuously active.
+  app.use((req, res, next) => {
+    const s = req.session;
+    if (s && s.userId && !(s.createdAt > Date.now() - SESSION_ABSOLUTE_MS)) {
+      return s.destroy(() => next());
+    }
+    next();
+  });
 
   // --- Core binding check ------------------------------------------------
   const sessionsCol = db.getClient().db(db.getDbName()).collection('sessions');
@@ -93,20 +117,24 @@ async function main() {
    * Indexed lookup on `session.userId`; `expires` is maintained by
    * connect-mongo from the cookie expiry, so stale sessions never count.
    */
+  // A session counts as live if it hasn't hit its idle expiry AND is within
+  // the absolute lifetime.
+  const liveSessionQuery = (userId) => ({
+    'session.userId': userId,
+    'session.createdAt': { $gt: Date.now() - SESSION_ABSOLUTE_MS },
+    expires: { $gt: new Date() },
+  });
+
   async function userHasActiveSession(userId) {
-    const doc = await sessionsCol.findOne(
-      { 'session.userId': userId, expires: { $gt: new Date() } },
-      { projection: { _id: 1 } }
-    );
+    const doc = await sessionsCol.findOne(liveSessionQuery(userId), {
+      projection: { _id: 1 },
+    });
     return !!doc;
   }
 
   /** How many live sessions (browsers/devices) the account currently has. */
   function countActiveSessions(userId) {
-    return sessionsCol.countDocuments({
-      'session.userId': userId,
-      expires: { $gt: new Date() },
-    });
+    return sessionsCol.countDocuments(liveSessionQuery(userId));
   }
 
   // Express 4 doesn't catch rejected promises from async handlers — the
@@ -121,6 +149,7 @@ async function main() {
       req.session.regenerate((err) => {
         if (err) return reject(err);
         req.session.userId = userId;
+        req.session.createdAt = Date.now(); // for the absolute lifetime
         req.session.save((err2) => (err2 ? reject(err2) : resolve()));
       });
     });
