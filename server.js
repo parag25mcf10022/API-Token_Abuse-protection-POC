@@ -203,10 +203,9 @@ async function main() {
     if (!cleanEmail.ok) {
       return res.status(400).json({ error: cleanEmail.error });
     }
-    if (!security.isPassword(password)) {
-      return res.status(400).json({
-        error: `Password is required (max ${security.LIMITS.password} characters).`,
-      });
+    const weak = security.passwordProblem(password, cleanEmail.value);
+    if (weak) {
+      return res.status(400).json({ error: weak });
     }
     let user;
     try {
@@ -231,7 +230,10 @@ async function main() {
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
 
     const user = await db.getUserByEmail(cleanEmail.value);
-    if (!user || !db.verifyPassword(password, user.passwordHash)) {
+    // Always run scrypt (against a dummy hash for unknown emails) so response
+    // time doesn't reveal whether the account exists.
+    const passwordOk = db.verifyPassword(password, user ? user.passwordHash : db.DUMMY_HASH);
+    if (!user || !passwordOk) {
       limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
@@ -450,6 +452,9 @@ function randomPassword() {
  * it was generated here (so it can be shown once), never otherwise.
  */
 async function seedAccount(email, envPassword, opts) {
+  if (envPassword && security.passwordProblem(envPassword, email)) {
+    console.warn(`Warning: password for ${email} from env is weak: ${security.passwordProblem(envPassword, email)}`);
+  }
   const existing = await db.getUserByEmail(email);
   if (!existing) {
     const password = envPassword || randomPassword();

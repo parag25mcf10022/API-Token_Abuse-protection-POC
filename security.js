@@ -17,6 +17,7 @@
 
 const LIMITS = {
   email: 254,
+  passwordMin: 8,
   password: 256,
   message: 2000,
 };
@@ -42,6 +43,40 @@ const isApiKey = (v) => typeof v === 'string' && API_KEY_RE.test(v);
 // enforce type and a length cap (bounds scrypt work per request).
 const isPassword = (v) =>
   typeof v === 'string' && v.length > 0 && v.length <= LIMITS.password;
+
+// A short deny-list of the most common passwords. Not exhaustive — for
+// production, check against a breached-password list (e.g. HIBP k-anonymity).
+const COMMON_PASSWORDS = new Set([
+  'password', 'password1', 'password123', '12345678', '123456789',
+  '1234567890', 'qwertyui', 'qwerty123', 'iloveyou', 'admin123',
+  'administrator', 'letmein1', 'welcome1', 'abc12345', '11111111',
+  'passw0rd', 'changeme', 'user1234', 'football', 'sunshine',
+]);
+
+/**
+ * Password policy for NEW passwords (signup). Returns an error string, or
+ * null if acceptable. Existing passwords are never re-checked at login.
+ */
+function passwordProblem(password, email) {
+  if (!isPassword(password)) {
+    return `Password is required (max ${LIMITS.password} characters).`;
+  }
+  if (password.length < LIMITS.passwordMin) {
+    return `Password must be at least ${LIMITS.passwordMin} characters.`;
+  }
+  const lower = password.toLowerCase();
+  if (COMMON_PASSWORDS.has(lower)) {
+    return 'That password is too common. Please choose another.';
+  }
+  if (/^(.)\1*$/.test(password)) {
+    return 'Password cannot be a single repeated character.';
+  }
+  const local = typeof email === 'string' ? email.split('@')[0].toLowerCase() : '';
+  if (local.length >= 3 && lower.includes(local)) {
+    return 'Password must not contain your email name.';
+  }
+  return null;
+}
 
 /**
  * Validate and normalize a free-text field.
@@ -105,5 +140,6 @@ module.exports = {
   cleanEmail,
   isApiKey,
   isPassword,
+  passwordProblem,
   securityHeaders,
 };

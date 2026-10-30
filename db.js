@@ -69,6 +69,11 @@ function hashPassword(password) {
   return `${salt}:${hash}`;
 }
 
+// Hash of a random throwaway password. Login verifies against this when the
+// email doesn't exist, so "unknown user" and "wrong password" take the same
+// time and can't be told apart.
+const DUMMY_HASH = hashPassword(crypto.randomBytes(16).toString('hex'));
+
 /** Constant-time verify of a password against a stored salt:hash string. */
 function verifyPassword(password, stored) {
   const [salt, hash] = stored.split(':');
@@ -96,8 +101,9 @@ async function nextId() {
 // New keys start DISABLED: an admin must approve (enable) them before use.
 async function createUser(email, password, { isAdmin = false, keyEnabled = false } = {}) {
   email = email.trim().toLowerCase();
+  // Deliberately vague: don't confirm whether an email is registered.
   if (await users.findOne({ email })) {
-    throw new Error('An account with that email already exists.');
+    throw new Error('Could not create an account with those details.');
   }
   const id = await nextId();
   const user = {
@@ -113,7 +119,7 @@ async function createUser(email, password, { isAdmin = false, keyEnabled = false
     await users.insertOne(user);
   } catch (e) {
     if (e.code === 11000) {
-      throw new Error('An account with that email already exists.');
+      throw new Error('Could not create an account with those details.');
     }
     throw e;
   }
@@ -169,5 +175,6 @@ module.exports = {
   setKeyEnabled,
   setPassword,
   verifyPassword,
+  DUMMY_HASH,
   generateApiKey,
 };
