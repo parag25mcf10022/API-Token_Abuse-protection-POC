@@ -8,14 +8,19 @@ is treated as dead: the user is sent to the web app to log in, and the client
 polls until the session goes active.
 
 Usage:
-    python3 client.py
-    python3 client.py --key ak_xxx          # skip the key prompt
+    python3 client.py                       # prompts for the key (hidden)
+    AAP_API_KEY=ak_xxx python3 client.py    # or read it from the environment
     python3 client.py --base http://localhost:3000
+
+The key is sent only in the X-API-Key header, never in a URL. Avoid passing it
+as a command-line argument: argv is visible in `ps` and saved in shell history.
 
 Requires the `requests` library:  pip install requests
 """
 
 import argparse
+import getpass
+import os
 import re
 import sys
 import time
@@ -40,55 +45,54 @@ def safe(value):
 
 
 def check_session(base, api_key):
-    """Return the server's session-status payload for an api_key, or None on error."""
+    """Ask whether the key is usable right now.
+
+    Returns (active, retry_after): active is True/False, or None if the server
+    couldn't be reached; retry_after is seconds to wait when rate limited.
+    """
     try:
         r = requests.get(
             f"{base}/auth/session-status",
-            params={"api_key": api_key},
+            headers={"X-API-Key": api_key},  # never in the URL (logs/history)
             timeout=5,
         )
-        return r.json()
     except requests.RequestException as e:
-        print(f"  ! Could not reach the server at {base}: {e}")
-        return None
+        print(f"\n  ! Could not reach the server at {base}: {safe(e)}")
+        return None, 0
+    if r.status_code == 429:
+        return False, int(r.headers.get("Retry-After", "10"))
+    try:
+        return bool(r.json().get("active")), 0
+    except ValueError:
+        return None, 0
 
 
 def wait_for_session(base, api_key):
-    """Poll session-status until the owning account is logged in. Returns True/False."""
-    status = check_session(base, api_key)
-    if status is None:
+    """Poll session-status until the key is usable. Returns True/False."""
+    active, _ = check_session(base, api_key)
+    if active is None:
         return False
-
-    if status.get("active"):
-        who = safe(status.get("email", "this account"))
-        print(f"✓ Active session found for {who}.")
+    if active:
+        print("✓ Key is active — your account is logged in.")
         return True
 
-    # Not active — explain why and send the user to log in.
-    if status.get("keyEnabled") is False:
-        print("✗ This API key is not enabled. An admin must enable it before it can be used.")
-        return False
-
-    print("No active session. Please log in at " + base)
+    # The server deliberately doesn't say WHY (so a stolen key reveals little).
+    print("Key not usable yet. Either:")
+    print(f"  • log in to the web app at {base}, or")
+    print("  • your key is waiting for an admin to enable it.")
     try:
         webbrowser.open(base)
     except Exception:
         pass  # headless / no browser — the printed URL is enough
 
-    print("Waiting for you to log in (Ctrl-C to cancel)", end="", flush=True)
+    print("Waiting (Ctrl-C to cancel)", end="", flush=True)
     while True:
-        time.sleep(2)
-        print(".", end="", flush=True)
-        status = check_session(base, api_key)
-        if status is None:
-            continue
-        if status.get("keyEnabled") is False:
-            print("\n✗ This API key is not enabled. An admin must enable it before it can be used.")
-            return False
-        if status.get("active"):
-            who = safe(status.get("email", "this account"))
-            print(f"\n✓ Session active for {who}.")
+        active, retry_after = check_session(base, api_key)
+        if active:
+            print("\n✓ Key is active — your account is logged in.")
             return True
+        time.sleep(max(2, retry_after))
+        print(".", end="", flush=True)
 
 
 def send_message(base, api_key, message):
@@ -96,7 +100,8 @@ def send_message(base, api_key, message):
     try:
         r = requests.post(
             f"{base}/api/message",
-            json={"api_key": api_key, "message": message},
+            headers={"X-API-Key": api_key},
+            json={"message": message},
             timeout=10,
         )
     except requests.RequestException as e:
@@ -122,13 +127,22 @@ def send_message(base, api_key, message):
 def main():
     ap = argparse.ArgumentParser(description="AAP shell client")
     ap.add_argument("--base", default="http://localhost:3000", help="server base URL")
-    ap.add_argument("--key", help="API key (otherwise you'll be prompted)")
+    ap.add_argument(
+        "--key",
+        help="API key (discouraged: visible in ps/shell history; prefer AAP_API_KEY or the prompt)",
+    )
     args = ap.parse_args()
     base = args.base.rstrip("/")
 
     print("=== Account-Bound API Key Protection — shell client ===\n")
 
-    api_key = args.key or input("Enter your API key: ").strip()
+    if args.key:
+        print("! Warning: --key is visible in process lists and shell history.\n")
+    api_key = (
+        args.key
+        or os.environ.get("AAP_API_KEY")
+        or getpass.getpass("Enter your API key (input hidden): ")
+    ).strip()
     if not api_key:
         sys.exit("No API key provided.")
 

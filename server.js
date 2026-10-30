@@ -171,12 +171,6 @@ async function main() {
     next();
   });
 
-  function maskEmail(email) {
-    const [name, domain] = email.split('@');
-    const shown = name.slice(0, 2);
-    return `${shown}${'*'.repeat(Math.max(1, name.length - 2))}@${domain}`;
-  }
-
   // --- Rate limits ---------------------------------------------------------
   const MIN = 60 * 1000;
   const limits = {
@@ -192,6 +186,28 @@ async function main() {
     messageUser: createLimiter({ windowMs: MIN, max: 60 }),
   };
   const byIp = (req) => req.ip;
+
+  // API keys travel ONLY in the X-API-Key header: never in the URL (it ends up
+  // in server/proxy logs and shell history) or the JSON body. Returns the key
+  // string, or sends a 400 and returns null.
+  function readApiKey(req, res) {
+    if (req.query.api_key !== undefined || (req.body && req.body.api_key !== undefined)) {
+      res.status(400).json({ error: 'Send the API key in the X-API-Key header, not the URL or body.' });
+      return null;
+    }
+    const key = req.get('X-API-Key');
+    if (key === undefined) {
+      res.status(400).json({ error: 'X-API-Key header required.' });
+      return null;
+    }
+    return key;
+  }
+
+  // Auth/API responses can carry keys or account state — never cache them.
+  app.use(['/auth', '/api'], (req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
 
   // =======================================================================
   // AUTH / WEB APP
@@ -298,16 +314,13 @@ async function main() {
   // AUTH BRIDGE — polled by the shell client
   // =======================================================================
 
-  // The CLI asks "is the account that owns this key currently logged in?"
-  // It purposely does NOT require the caller to be logged in (the CLI has no
-  // cookie). It only reveals a boolean (+ masked email), never the key.
+  // The CLI asks "can this key be used right now?" It purposely does NOT
+  // require the caller to be logged in (the CLI has no cookie). It reveals a
+  // single boolean — not the owner's email, not WHY a key is unusable — so a
+  // stolen key tells an attacker as little as possible.
   app.get('/auth/session-status', limit(limits.statusIp, byIp), wrap(async (req, res) => {
-    const apiKey = req.query.api_key;
-    // Must be a well-formed key string — `?api_key[$ne]=x` parses to an
-    // object and would otherwise be passed to MongoDB as a query operator.
-    if (apiKey === undefined) {
-      return res.status(400).json({ error: 'api_key query param required' });
-    }
+    const apiKey = readApiKey(req, res);
+    if (apiKey === null) return;
     if (!security.isApiKey(apiKey)) {
       // Same answer as an unknown key — don't reveal what's malformed.
       return res.json({ active: false });
@@ -317,12 +330,8 @@ async function main() {
       // Don't leak whether a key exists; just report "no session".
       return res.json({ active: false });
     }
-    const active = await userHasActiveSession(user.id);
-    res.json({
-      active: active && user.keyEnabled,
-      keyEnabled: user.keyEnabled,
-      email: maskEmail(user.email),
-    });
+    const active = user.keyEnabled && (await userHasActiveSession(user.id));
+    res.json({ active });
   }));
 
   // =======================================================================
@@ -330,9 +339,11 @@ async function main() {
   // =======================================================================
 
   app.post('/api/message', limit(limits.messageIp, byIp), wrap(async (req, res) => {
-    const { api_key, message } = req.body || {};
-    if (api_key === undefined || message === undefined) {
-      return res.status(400).json({ error: 'api_key and message are required.' });
+    const api_key = readApiKey(req, res);
+    if (api_key === null) return;
+    const { message } = req.body || {};
+    if (message === undefined) {
+      return res.status(400).json({ error: 'message is required.' });
     }
     const msg = security.cleanText(message, 'message', security.LIMITS.message);
     if (!msg.ok) {
