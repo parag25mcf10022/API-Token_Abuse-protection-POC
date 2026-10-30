@@ -4,6 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AAP — Account-Bound API Key Protection</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
@@ -44,6 +45,12 @@
         <button id="logout-btn" class="ghost">Log out</button>
       </div>
 
+      <div id="revoked-banner" class="callout danger hidden">
+        <strong>Your API key was revoked.</strong>
+        <span id="revoked-text"></span>
+        Generate a new key below — it will be shown only to you.
+      </div>
+
       <div class="keybox">
         <p class="muted">Your API key</p>
         <div class="row">
@@ -71,6 +78,33 @@
       <div class="row between">
         <p id="session-count" class="muted small"></p>
         <button id="logout-all-btn" class="ghost small">Log out everywhere</button>
+      </div>
+
+      <div class="plan">
+        <p class="muted">Your plan <span class="small">(set by your admin)</span></p>
+        <p id="plan-org" class="small"></p>
+        <p id="plan-scopes" class="small"></p>
+        <p id="plan-limits" class="small"></p>
+        <p id="plan-usage" class="small"></p>
+      </div>
+
+      <div id="master-box" class="keybox hidden">
+        <p class="muted">Organization master key <span class="small">(org admins only — management, not messaging)</span></p>
+        <p class="small">
+          Current: <code id="master-prefix"></code>.
+          Use it with <code>org_client.py</code> from one of your approved devices while logged in here.
+          Generating a new one immediately invalidates the old one.
+        </p>
+        <code id="master-key" class="key hidden"></code>
+        <p id="master-once" class="warn small hidden">
+          Copy this master key now — it is stored only as a hash and won't be shown again.
+        </p>
+        <form id="master-form" class="row">
+          <input type="password" id="master-password" placeholder="Current password"
+                 autocomplete="current-password" maxlength="256" required />
+          <button type="submit" class="ghost small">Generate master key</button>
+        </form>
+        <p id="master-error" class="error"></p>
       </div>
 
       <div class="devices">

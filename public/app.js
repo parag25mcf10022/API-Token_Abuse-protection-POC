@@ -34,7 +34,38 @@ function showDashboard(user) {
   $('session-count').textContent = n > 1
     ? `⚠️ ${n} active sessions — your key stays alive until all of them log out.`
     : `${n} active session (this browser).`;
-  $('admin-link').classList.toggle('hidden', !user.isAdmin);
+  const orgAdmin = user.org && user.org.role === 'admin';
+  $('admin-link').classList.toggle('hidden', !(user.isAdmin || orgAdmin));
+  $('admin-link').textContent = user.isAdmin ? 'Open admin panel →' : 'Manage your organization →';
+
+  $('revoked-banner').classList.toggle('hidden', !user.keyRevoked);
+  $('revoked-text').textContent = user.apiKeyPrefix
+    ? ''
+    : 'You have no active key (new accounts and revoked keys need a fresh one).';
+
+  // Read-only plan: what admins configured for this key.
+  const l = user.limits || {};
+  const fmt = (v) => (Number.isInteger(v) ? v.toLocaleString() : 'unlimited');
+  $('plan-org').textContent = user.org
+    ? `Organization: ${user.org.name} (${user.org.role})`
+    : 'Personal account';
+  $('plan-scopes').textContent = `Allowed categories: ${user.scopes.join(', ') || 'none'}`;
+  const cats = Object.entries(l.categoryRequestsPerDay || {}).map(([c, v]) => `${c} ${v}/day`);
+  $('plan-limits').textContent =
+    `Limits: ${fmt(l.burstPerMinute)}/min · ${fmt(l.requestsPerDay)} req/day · ` +
+    `${fmt(l.requestsPerMonth)} req/month · ${fmt(l.tokensPerDay)} tokens/day · ` +
+    `${fmt(l.tokensPerMonth)} tokens/month${cats.length ? ' · ' + cats.join(', ') : ''}`;
+  const u = user.usage;
+  $('plan-usage').textContent =
+    `Used today: ${u.today.requests} requests, ${u.today.tokens} tokens · ` +
+    `this month: ${u.month.requests} requests, ${u.month.tokens} tokens`;
+
+  $('master-box').classList.toggle('hidden', !orgAdmin);
+  if (orgAdmin) {
+    $('master-prefix').textContent = user.org.masterKeyPrefix ? `${user.org.masterKeyPrefix}…` : 'none issued';
+    $('master-key').classList.add('hidden');
+    $('master-once').classList.add('hidden');
+  }
 }
 
 // The dashboard always renders from /auth/me so key state and session count
@@ -159,6 +190,20 @@ $('copy-btn').onclick = async () => {
 };
 
 $('devices-refresh').onclick = loadDevices;
+
+$('master-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('master-error').textContent = '';
+  if (!confirm('Generate a new master key? The current one stops working immediately.')) return;
+  const body = JSON.stringify({ password: $('master-password').value });
+  const { ok, data } = await api('/auth/org/master-key', { method: 'POST', body });
+  $('master-password').value = '';
+  if (!ok) { $('master-error').textContent = data.error || 'Could not generate master key.'; return; }
+  await loadDashboard();
+  $('master-key').textContent = data.masterKey;
+  $('master-key').classList.remove('hidden');
+  $('master-once').classList.remove('hidden');
+};
 
 // --- On load: are we already logged in? ---
 loadDashboard();

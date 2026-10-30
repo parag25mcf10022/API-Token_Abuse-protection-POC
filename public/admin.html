@@ -4,32 +4,81 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>AAP — Admin panel</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
   <div class="wrap wide">
     <header>
       <h1>🛠️ Admin panel</h1>
-      <p class="sub">Toggle any user's API key on or off.</p>
+      <p id="actor" class="sub"></p>
     </header>
 
+    <div class="row between">
+      <a href="/" class="ghost small">← Back to dashboard</a>
+      <button id="refresh" class="ghost small">Refresh</button>
+    </div>
+    <p id="admin-error" class="error"></p>
+
+    <!-- ALERTS -->
     <section class="card">
-      <div class="row between">
-        <a href="/" class="ghost small">← Back to dashboard</a>
-        <button id="refresh" class="ghost small">Refresh</button>
-      </div>
-      <p id="admin-error" class="error"></p>
+      <h2>Security alerts</h2>
+      <p class="muted small">
+        New devices, logins from new IPs, lockouts, and limit hits. If something
+        looks wrong, <strong>Revoke key</strong>: the old key stops working and all
+        of the user's sessions end. The user then logs in and generates a new key —
+        only they ever see it.
+      </p>
       <table>
-        <thead>
-          <tr>
-            <th>Email</th>
-            <th>Session</th>
-            <th>Key</th>
-            <th></th>
-          </tr>
-        </thead>
+        <thead><tr><th>When</th><th>User</th><th>Event</th><th>Detail</th><th></th></tr></thead>
+        <tbody id="alerts"></tbody>
+      </table>
+      <p id="alerts-empty" class="muted small hidden">No open alerts.</p>
+    </section>
+
+    <!-- ORGS -->
+    <section class="card">
+      <h2>Organizations</h2>
+      <form id="org-form" class="row hidden">
+        <input id="org-name" placeholder="New organization name" maxlength="80" required />
+        <button type="submit" class="ghost small">Create org</button>
+      </form>
+      <div id="orgs"></div>
+    </section>
+
+    <!-- USERS -->
+    <section class="card">
+      <h2>Users</h2>
+      <table>
+        <thead><tr><th>User</th><th>Org / role</th><th>Key</th><th>Sessions</th><th>Usage today</th><th></th></tr></thead>
         <tbody id="users"></tbody>
       </table>
+    </section>
+
+    <!-- POLICY EDITOR -->
+    <section id="editor" class="card hidden">
+      <h2 id="editor-title"></h2>
+      <p class="muted small">Leave a limit blank for no limit at this level. User and org limits both apply — the stricter wins.</p>
+      <form id="editor-form">
+        <fieldset>
+          <legend>Allowed content categories (scopes)</legend>
+          <label class="check"><input type="checkbox" id="scope-all" /> No restriction (all categories)</label>
+          <div id="scope-list"></div>
+        </fieldset>
+        <fieldset>
+          <legend>Usage limits</legend>
+          <div id="limit-list" class="grid2"></div>
+        </fieldset>
+        <fieldset>
+          <legend>Per-category requests per day</legend>
+          <div id="cat-list" class="grid2"></div>
+        </fieldset>
+        <div class="row">
+          <button type="submit" class="primary">Save policy</button>
+          <button type="button" id="editor-cancel" class="ghost">Cancel</button>
+        </div>
+        <p id="editor-error" class="error"></p>
+      </form>
     </section>
   </div>
 

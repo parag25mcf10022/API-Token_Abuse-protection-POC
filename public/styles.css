@@ -149,3 +149,47 @@ th { color: var(--muted); font-weight: 600; }
 .devices table {
   width: 100%;
 }
+
+.callout.danger {
+  border-color: var(--bad);
+}
+.plan {
+  margin: 22px 0;
+}
+.plan p {
+  margin: 4px 0;
+}
+.org {
+  border-top: 1px solid var(--line);
+  padding: 12px 0;
+}
+.org p {
+  margin: 4px 0;
+}
+fieldset {
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  margin: 0 0 14px;
+}
+label.check {
+  flex-direction: row;
+  align-items: center;
+  margin: 4px 0;
+}
+form.row {
+  flex-direction: row;
+  flex-wrap: wrap;
+}
+form.row input {
+  flex: 1;
+  min-width: 160px;
+}
+.grid2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px 16px;
+}
+select {
+  font: inherit;
+  padding: 4px;
+}
