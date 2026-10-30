@@ -14,6 +14,15 @@ const LIMIT_LABELS = {
   tokensPerMonth: 'Tokens / month',
 };
 
+// Badge tone per alert type.
+const ALERT_TONES = {
+  new_device: 'warn',
+  new_ip_login: 'info',
+  login_lockout: 'off',
+  limit_exceeded: 'warn',
+  key_revoked: 'off',
+};
+
 const ALERT_LABELS = {
   new_device: 'New device',
   new_ip_login: 'Login from new IP',
@@ -73,7 +82,15 @@ async function load() {
     ? 'Super admin — you can manage every organization and user.'
     : `Org admin — managing ${orgName(a.orgId)}.`;
   $('org-form').classList.toggle('hidden', a.kind !== 'super');
-  renderAlerts((await api('/api/admin/alerts')).data.alerts || []);
+  const alertList = (await api('/api/admin/alerts')).data.alerts || [];
+  $('tile-users').textContent = state.users.length;
+  $('tile-orgs').textContent = state.orgs.length;
+  $('tile-alerts').textContent = alertList.length;
+  $('tile-alerts-box').classList.toggle('alerting', alertList.length > 0);
+  $('tile-requests').textContent = state.users
+    .reduce((n, u) => n + u.usage.today.requests, 0)
+    .toLocaleString();
+  renderAlerts(alertList);
   renderOrgs();
   renderUsers();
 }
@@ -96,7 +113,7 @@ function renderAlerts(list) {
       }), ' ');
     }
     actions.append(button('Resolve', () => act(post(`/api/admin/alerts/${al.publicId}/resolve`))));
-    tbody.append(el('tr', {}, td(when), td(String(al.email)), td(ALERT_LABELS[al.type] || al.type), td(detail), actions));
+    tbody.append(el('tr', {}, td(when), td(String(al.email)), td(el('span', { class: `badge ${ALERT_TONES[al.type] || 'info'}` }, ALERT_LABELS[al.type] || al.type)), td(detail), actions));
   }
 }
 

@@ -8,41 +8,76 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="wrap">
-    <header>
-      <h1>🔐 Account-Bound API Key Protection</h1>
-      <p class="sub">Your API key is useless without an active login here.</p>
-    </header>
-
-    <!-- AUTH CARD -->
-    <section id="auth-view" class="card hidden">
-      <div class="tabs">
-        <button id="tab-login" class="tab active">Log in</button>
-        <button id="tab-signup" class="tab">Sign up</button>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">🔐</span>
+        <div>
+          <strong>AAP</strong>
+          <span class="brand-sub">Account-Bound API Key Protection</span>
+        </div>
       </div>
-      <form id="auth-form">
-        <label>Email
-          <input type="email" id="email" autocomplete="username" maxlength="254" required />
-        </label>
-        <label>Password
-          <input type="password" id="password" autocomplete="current-password" maxlength="256" required />
-        </label>
-        <button type="submit" id="auth-submit" class="primary">Log in</button>
-        <p id="auth-error" class="error"></p>
-      </form>
-      <p class="hint">
-        New accounts need an admin to enable their API key before it works.
-      </p>
+      <div id="topbar-user" class="topbar-user hidden">
+        <a id="admin-link" href="/admin.html" class="ghost small hidden">Open admin panel →</a>
+        <span id="dash-email" class="user-chip"></span>
+        <button id="logout-btn" class="ghost small">Log out</button>
+      </div>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- AUTH -->
+    <section id="auth-view" class="auth hidden">
+      <div class="auth-intro">
+        <h1>Your API key is useless without you.</h1>
+        <p class="lead">
+          Keys only work while you're logged in here, from devices you approve,
+          within the limits your admin sets. Stolen keys don't get far.
+        </p>
+        <ul class="ticks">
+          <li>Bound to your live browser session</li>
+          <li>Device approval with pairing codes</li>
+          <li>Hashed storage — shown to you once</li>
+        </ul>
+      </div>
+      <div class="card auth-card">
+        <div class="tabs">
+          <button id="tab-login" class="tab active">Log in</button>
+          <button id="tab-signup" class="tab">Sign up</button>
+        </div>
+        <form id="auth-form">
+          <label>Email
+            <input type="email" id="email" autocomplete="username" maxlength="254" required />
+          </label>
+          <label>Password
+            <input type="password" id="password" autocomplete="current-password" maxlength="256" required />
+          </label>
+          <button type="submit" id="auth-submit" class="primary">Log in</button>
+          <p id="auth-error" class="error"></p>
+        </form>
+        <p class="hint">New accounts need an admin to enable their API key before it works.</p>
+      </div>
     </section>
 
     <!-- DASHBOARD -->
-    <section id="dash-view" class="card hidden">
-      <div class="row between">
-        <div>
-          <p class="muted">Signed in as</p>
-          <h2 id="dash-email"></h2>
+    <section id="dash-view" class="hidden">
+      <div class="status-strip">
+        <div class="status-item">
+          <span class="status-label">Session</span>
+          <span id="status-session" class="pill"></span>
         </div>
-        <button id="logout-btn" class="ghost">Log out</button>
+        <div class="status-item">
+          <span class="status-label">API key</span>
+          <span id="status-key" class="pill"></span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Devices</span>
+          <span id="status-devices" class="pill"></span>
+        </div>
+        <div class="status-item">
+          <span class="status-label">Account</span>
+          <span id="plan-org" class="pill neutral"></span>
+        </div>
       </div>
 
       <div id="revoked-banner" class="callout danger hidden">
@@ -51,82 +86,100 @@
         Generate a new key below — it will be shown only to you.
       </div>
 
-      <div class="keybox">
-        <p class="muted">Your API key</p>
-        <div class="row">
-          <code id="api-key" class="key"></code>
-          <button id="copy-btn" class="ghost small hidden">Copy</button>
-        </div>
-        <p id="key-once" class="warn small hidden">
-          Copy this key now — it is stored only as a hash and won't be shown again.
-        </p>
-        <p id="key-state" class="muted small"></p>
-        <form id="rotate-form" class="row">
-          <input type="password" id="rotate-password" placeholder="Current password"
-                 autocomplete="current-password" maxlength="256" required />
-          <button type="submit" class="ghost small">Generate new key</button>
-        </form>
-        <p id="rotate-error" class="error"></p>
-      </div>
+      <div class="grid">
+        <!-- API KEY -->
+        <section class="card">
+          <div class="card-head">
+            <h2>API key</h2>
+            <span id="key-state" class="muted small"></span>
+          </div>
+          <div class="row">
+            <code id="api-key" class="key"></code>
+            <button id="copy-btn" class="ghost small hidden">Copy</button>
+          </div>
+          <p id="key-once" class="warn small hidden">
+            Copy this key now — it is stored only as a hash and won't be shown again.
+          </p>
+          <form id="rotate-form" class="row">
+            <input type="password" id="rotate-password" placeholder="Current password"
+                   autocomplete="current-password" maxlength="256" required />
+            <button type="submit" class="ghost small">Generate new key</button>
+          </form>
+          <p id="rotate-error" class="error"></p>
+        </section>
 
-      <div class="callout">
-        <strong>This session keeps your key alive.</strong>
-        While this browser is logged in, the shell client can use your key.
-        Log out and the very same key stops working — that's the whole idea.
-      </div>
+        <!-- SESSION -->
+        <section class="card">
+          <div class="card-head">
+            <h2>Session</h2>
+          </div>
+          <p class="body-text">
+            <strong>This session keeps your key alive.</strong>
+            While this browser is logged in, the shell client can use your key.
+            Log out and the very same key stops working.
+          </p>
+          <div class="row between">
+            <p id="session-count" class="muted small"></p>
+            <button id="logout-all-btn" class="ghost small danger">Log out everywhere</button>
+          </div>
+        </section>
 
-      <div class="row between">
-        <p id="session-count" class="muted small"></p>
-        <button id="logout-all-btn" class="ghost small">Log out everywhere</button>
-      </div>
+        <!-- PLAN & USAGE -->
+        <section class="card span-2">
+          <div class="card-head">
+            <h2>Plan &amp; usage</h2>
+            <span class="muted small">Set by your admin</span>
+          </div>
+          <div id="plan-scopes" class="chips"></div>
+          <div id="usage-meters" class="meters"></div>
+          <p id="plan-limits" class="muted small"></p>
+        </section>
 
-      <div class="plan">
-        <p class="muted">Your plan <span class="small">(set by your admin)</span></p>
-        <p id="plan-org" class="small"></p>
-        <p id="plan-scopes" class="small"></p>
-        <p id="plan-limits" class="small"></p>
-        <p id="plan-usage" class="small"></p>
-      </div>
+        <!-- MASTER KEY (org admins) -->
+        <section id="master-box" class="card span-2 hidden">
+          <div class="card-head">
+            <h2>Organization master key</h2>
+            <span class="muted small">Org admins only · management, not messaging</span>
+          </div>
+          <p class="body-text small">
+            Current: <code id="master-prefix"></code>. Use it with <code>org_client.py</code>
+            from one of your approved devices while logged in here. Generating a new one
+            immediately invalidates the old one.
+          </p>
+          <code id="master-key" class="key hidden"></code>
+          <p id="master-once" class="warn small hidden">
+            Copy this master key now — it is stored only as a hash and won't be shown again.
+          </p>
+          <form id="master-form" class="row">
+            <input type="password" id="master-password" placeholder="Current password"
+                   autocomplete="current-password" maxlength="256" required />
+            <button type="submit" class="ghost small">Generate master key</button>
+          </form>
+          <p id="master-error" class="error"></p>
+        </section>
 
-      <div id="master-box" class="keybox hidden">
-        <p class="muted">Organization master key <span class="small">(org admins only — management, not messaging)</span></p>
-        <p class="small">
-          Current: <code id="master-prefix"></code>.
-          Use it with <code>org_client.py</code> from one of your approved devices while logged in here.
-          Generating a new one immediately invalidates the old one.
-        </p>
-        <code id="master-key" class="key hidden"></code>
-        <p id="master-once" class="warn small hidden">
-          Copy this master key now — it is stored only as a hash and won't be shown again.
-        </p>
-        <form id="master-form" class="row">
-          <input type="password" id="master-password" placeholder="Current password"
-                 autocomplete="current-password" maxlength="256" required />
-          <button type="submit" class="ghost small">Generate master key</button>
-        </form>
-        <p id="master-error" class="error"></p>
+        <!-- DEVICES -->
+        <section class="card span-2">
+          <div class="card-head">
+            <h2>Devices</h2>
+            <button id="devices-refresh" class="ghost small">Refresh</button>
+          </div>
+          <p class="muted small">
+            Your key only works from devices you approve. The shell client prints a
+            pairing code — approve only if it matches. An unknown pending device
+            means your key is being used elsewhere: remove it and generate a new key.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Device</th><th>Code</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
+              <tbody id="device-list"></tbody>
+            </table>
+          </div>
+          <p id="device-empty" class="empty hidden">No devices yet — run the shell client to register one.</p>
+        </section>
       </div>
-
-      <div class="devices">
-        <div class="row between">
-          <p class="muted">Devices allowed to use your key</p>
-          <button id="devices-refresh" class="ghost small">Refresh</button>
-        </div>
-        <p class="muted small">
-          Your key only works from devices you approve. The shell client prints a
-          pairing code — approve only if it matches. An unknown pending device
-          means your key is being used elsewhere: remove it and generate a new key.
-        </p>
-        <table>
-          <thead><tr><th>Device</th><th>Code</th><th>Status</th><th>Last seen</th><th></th></tr></thead>
-          <tbody id="device-list"></tbody>
-        </table>
-        <p id="device-empty" class="muted small hidden">No devices yet — run the shell client to register one.</p>
-      </div>
-
-      <a id="admin-link" href="/admin.html" class="ghost hidden">Open admin panel →</a>
     </section>
-  </div>
+  </main>
 
   <script src="/app.js"></script>
 </body>

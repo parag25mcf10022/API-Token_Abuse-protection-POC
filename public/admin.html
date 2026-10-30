@@ -8,37 +8,57 @@
   <link rel="stylesheet" href="/styles.css" />
 </head>
 <body>
-  <div class="wrap wide">
-    <header>
-      <h1>🛠️ Admin panel</h1>
-      <p id="actor" class="sub"></p>
-    </header>
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">🛠️</span>
+        <div>
+          <strong>AAP Admin</strong>
+          <span class="brand-sub">Keys, organizations, limits &amp; alerts</span>
+        </div>
+      </div>
+      <div class="topbar-user">
+        <a href="/" class="ghost small">← Dashboard</a>
+        <button id="refresh" class="ghost small">Refresh</button>
+      </div>
+    </div>
+  </header>
 
-    <div class="row between">
-      <a href="/" class="ghost small">← Back to dashboard</a>
-      <button id="refresh" class="ghost small">Refresh</button>
+  <main class="wrap">
+    <div class="page-head">
+      <h1>Admin panel</h1>
+      <p id="actor" class="sub"></p>
     </div>
     <p id="admin-error" class="error"></p>
 
+    <div class="tiles">
+      <div class="tile"><div id="tile-users" class="tile-value">–</div><div class="tile-label">Users</div></div>
+      <div class="tile"><div id="tile-orgs" class="tile-value">–</div><div class="tile-label">Organizations</div></div>
+      <div id="tile-alerts-box" class="tile"><div id="tile-alerts" class="tile-value">–</div><div class="tile-label">Open alerts</div></div>
+      <div class="tile"><div id="tile-requests" class="tile-value">–</div><div class="tile-label">Requests today</div></div>
+    </div>
+
     <!-- ALERTS -->
     <section class="card">
-      <h2>Security alerts</h2>
+      <div class="card-head"><h2>Security alerts</h2></div>
       <p class="muted small">
         New devices, logins from new IPs, lockouts, and limit hits. If something
         looks wrong, <strong>Revoke key</strong>: the old key stops working and all
         of the user's sessions end. The user then logs in and generates a new key —
         only they ever see it.
       </p>
-      <table>
-        <thead><tr><th>When</th><th>User</th><th>Event</th><th>Detail</th><th></th></tr></thead>
-        <tbody id="alerts"></tbody>
-      </table>
-      <p id="alerts-empty" class="muted small hidden">No open alerts.</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>When</th><th>User</th><th>Event</th><th>Detail</th><th></th></tr></thead>
+          <tbody id="alerts"></tbody>
+        </table>
+      </div>
+      <p id="alerts-empty" class="empty hidden">No open alerts — all quiet.</p>
     </section>
 
     <!-- ORGS -->
     <section class="card">
-      <h2>Organizations</h2>
+      <div class="card-head"><h2>Organizations</h2></div>
       <form id="org-form" class="row hidden">
         <input id="org-name" placeholder="New organization name" maxlength="80" required />
         <button type="submit" class="ghost small">Create org</button>
@@ -48,11 +68,13 @@
 
     <!-- USERS -->
     <section class="card">
-      <h2>Users</h2>
-      <table>
-        <thead><tr><th>User</th><th>Org / role</th><th>Key</th><th>Sessions</th><th>Usage today</th><th></th></tr></thead>
-        <tbody id="users"></tbody>
-      </table>
+      <div class="card-head"><h2>Users</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>User</th><th>Org / role</th><th>Key</th><th>Sessions</th><th>Usage today</th><th></th></tr></thead>
+          <tbody id="users"></tbody>
+        </table>
+      </div>
     </section>
 
     <!-- POLICY EDITOR -->
@@ -80,7 +102,7 @@
         <p id="editor-error" class="error"></p>
       </form>
     </section>
-  </div>
+  </main>
 
   <script src="/admin.js"></script>
 </body>

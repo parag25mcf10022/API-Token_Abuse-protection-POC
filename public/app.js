@@ -17,11 +17,47 @@ async function api(path, opts = {}) {
 function showAuth() {
   $('auth-view').classList.remove('hidden');
   $('dash-view').classList.add('hidden');
+  $('topbar-user').classList.add('hidden');
+}
+
+function setPill(id, text, tone) {
+  const pill = $(id);
+  pill.textContent = text;
+  pill.className = `pill ${tone}`;
+}
+
+// One usage row: label, "used / limit", and a <meter> when a limit is set.
+function usageRow(label, used, limit) {
+  const row = document.createElement('div');
+  row.className = 'meter-row';
+  const head = document.createElement('div');
+  head.className = 'meter-head';
+  const name = document.createElement('span');
+  name.textContent = label;
+  const nums = document.createElement('span');
+  nums.className = 'muted';
+  nums.textContent = Number.isInteger(limit)
+    ? `${used.toLocaleString()} / ${limit.toLocaleString()}`
+    : `${used.toLocaleString()} · unlimited`;
+  head.append(name, nums);
+  row.append(head);
+  if (Number.isInteger(limit)) {
+    const m = document.createElement('meter');
+    m.min = 0;
+    m.max = Math.max(limit, 1);
+    m.value = Math.min(used, m.max);
+    m.low = m.max * 0.7;
+    m.high = m.max * 0.9;
+    m.optimum = 0;
+    row.append(m);
+  }
+  return row;
 }
 
 function showDashboard(user) {
   $('auth-view').classList.add('hidden');
   $('dash-view').classList.remove('hidden');
+  $('topbar-user').classList.remove('hidden');
   $('dash-email').textContent = user.email;
   // Only the non-secret prefix is ever available after creation.
   $('api-key').textContent = `${user.apiKeyPrefix}${'•'.repeat(12)}`;
@@ -29,8 +65,12 @@ function showDashboard(user) {
   $('key-once').classList.add('hidden');
   $('key-state').textContent = user.keyEnabled
     ? 'Key is enabled.'
-    : '⚠️ Key is not enabled — an admin must enable it before it can be used.';
+    : 'Not enabled yet — an admin must enable it.';
+  if (user.keyRevoked) setPill('status-key', 'Revoked — generate new', 'bad');
+  else if (!user.keyEnabled) setPill('status-key', 'Awaiting admin', 'warnpill');
+  else setPill('status-key', 'Enabled', 'ok');
   const n = user.activeSessions || 0;
+  setPill('status-session', n > 1 ? `${n} active` : 'Active', n > 1 ? 'warnpill' : 'ok');
   $('session-count').textContent = n > 1
     ? `⚠️ ${n} active sessions — your key stays alive until all of them log out.`
     : `${n} active session (this browser).`;
@@ -49,16 +89,31 @@ function showDashboard(user) {
   $('plan-org').textContent = user.org
     ? `Organization: ${user.org.name} (${user.org.role})`
     : 'Personal account';
-  $('plan-scopes').textContent = `Allowed categories: ${user.scopes.join(', ') || 'none'}`;
+  const chips = $('plan-scopes');
+  chips.replaceChildren();
+  const label = document.createElement('span');
+  label.className = 'chips-label';
+  label.textContent = 'Allowed categories:';
+  chips.append(label);
+  for (const c of user.scopes) {
+    const chip = document.createElement('span');
+    chip.className = 'chip';
+    chip.textContent = c;
+    chips.append(' ', chip);
+  }
+  if (!user.scopes.length) chips.append(' none');
   const cats = Object.entries(l.categoryRequestsPerDay || {}).map(([c, v]) => `${c} ${v}/day`);
   $('plan-limits').textContent =
     `Limits: ${fmt(l.burstPerMinute)}/min · ${fmt(l.requestsPerDay)} req/day · ` +
     `${fmt(l.requestsPerMonth)} req/month · ${fmt(l.tokensPerDay)} tokens/day · ` +
     `${fmt(l.tokensPerMonth)} tokens/month${cats.length ? ' · ' + cats.join(', ') : ''}`;
   const u = user.usage;
-  $('plan-usage').textContent =
-    `Used today: ${u.today.requests} requests, ${u.today.tokens} tokens · ` +
-    `this month: ${u.month.requests} requests, ${u.month.tokens} tokens`;
+  $('usage-meters').replaceChildren(
+    usageRow('Requests today', u.today.requests, l.requestsPerDay),
+    usageRow('Requests this month', u.month.requests, l.requestsPerMonth),
+    usageRow('Tokens today', u.today.tokens, l.tokensPerDay),
+    usageRow('Tokens this month', u.month.tokens, l.tokensPerMonth)
+  );
 
   $('master-box').classList.toggle('hidden', !orgAdmin);
   if (orgAdmin) {
@@ -86,6 +141,11 @@ async function loadDevices() {
   tbody.replaceChildren();
   if (!ok) return;
   $('device-empty').classList.toggle('hidden', data.devices.length > 0);
+  const approved = data.devices.filter((d) => d.status === 'approved').length;
+  const pending = data.devices.length - approved;
+  if (pending) setPill('status-devices', `${pending} pending review`, 'warnpill');
+  else if (approved) setPill('status-devices', `${approved} approved`, 'ok');
+  else setPill('status-devices', 'None yet', 'neutral');
   const cell = (...children) => {
     const td = document.createElement('td');
     td.append(...children);
