@@ -71,6 +71,12 @@ function showDashboard(user) {
   $('dash-view').classList.remove('hidden');
   $('topbar-user').classList.remove('hidden');
   $('dash-email').textContent = user.email;
+  // Make it obvious whose password the key actions want: yours.
+  for (const id of ['rotate-password', 'protection-password', 'master-password']) {
+    $(id).placeholder = `Your password (${user.email})`;
+  }
+  $('pw-banner').classList.toggle('hidden', !user.mustChangePassword);
+  if (user.mustChangePassword) $('password-card').scrollIntoView({ block: 'center' });
   // Masked by default; the full key needs the password (Show key).
   maskedKey = user.apiKeyPrefix ? `${user.apiKeyPrefix}${'•'.repeat(12)}` : '— no active key —';
   hideKey();
@@ -331,6 +337,22 @@ $('rotate-form').onsubmit = async (e) => {
     return;
   }
   loadDashboard(data.apiKey);
+};
+
+$('password-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('pw-error').textContent = '';
+  $('pw-msg').textContent = '';
+  if ($('pw-new').value !== $('pw-confirm').value) {
+    $('pw-error').textContent = 'The new passwords do not match.';
+    return;
+  }
+  const body = JSON.stringify({ currentPassword: $('pw-current').value, newPassword: $('pw-new').value });
+  const { ok, data } = await api('/auth/change-password', { method: 'POST', body });
+  for (const id of ['pw-current', 'pw-new', 'pw-confirm']) $(id).value = '';
+  if (!ok) { $('pw-error').textContent = data.error || 'Could not change password.'; return; }
+  $('pw-msg').textContent = `Password changed.${data.otherSessionsEnded ? ` Logged out ${data.otherSessionsEnded} other session(s).` : ''}`;
+  loadDashboard();
 };
 
 $('protection-form').onsubmit = async (e) => {

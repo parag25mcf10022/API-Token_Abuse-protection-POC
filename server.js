@@ -147,6 +147,18 @@ async function main() {
     Promise.resolve(fn(req, res, next)).catch(next);
 
 
+  // Accounts whose password was chosen by someone else (org members added by
+  // an admin) must set their own before any key action. Every sensitive action
+  // checks the LOGGED-IN account's own password — never anyone else's.
+  function needsOwnPassword(user, res) {
+    if (!user.mustChangePassword) return false;
+    res.status(403).json({
+      error: 'Set your own password first (Change password on your dashboard). Your current one was chosen by your admin.',
+      mustChangePassword: true,
+    });
+    return true;
+  }
+
   // Start a fresh session ID on authentication (prevents session fixation).
   function startSession(req, userId) {
     return new Promise((resolve, reject) => {
@@ -306,7 +318,7 @@ async function main() {
       await alerts.raise('new_ip_login', user, { detail: 'Login from a new IP address.', ip: req.ip });
     }
     await startSession(req, user.id);
-    res.json({ email: user.email, isAdmin: user.isAdmin });
+    res.json({ email: user.email, isAdmin: user.isAdmin, mustChangePassword: !!user.mustChangePassword });
   }));
 
   app.post('/auth/logout', (req, res) => {
@@ -344,6 +356,7 @@ async function main() {
 
     const user = await db.getUserById(userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (needsOwnPassword(user, res)) return;
     const { password } = req.body || {};
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
       limits.revealFail.hit(userId);
@@ -386,6 +399,7 @@ async function main() {
   app.post('/auth/protection', requireLogin, wrap(async (req, res) => {
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (needsOwnPassword(user, res)) return;
     if (await db.getOrg(user.orgId)) return res.status(403).json({ error: 'Set by your organization admin.' });
     const failKey = `rotate|${user.id}`;
     const lock = limits.loginFail.blocked(failKey);
@@ -401,6 +415,34 @@ async function main() {
     limits.loginFail.reset(failKey);
     await db.setProtection(user.id, action);
     res.json({ action });
+  }));
+
+  // Change your own password: requires your CURRENT password (wrong attempts
+  // share the lockout used by other sensitive actions). Ends every other
+  // session for the account, so a stolen session can't outlive the change.
+  app.post('/auth/change-password', requireLogin, wrap(async (req, res) => {
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    const failKey = `rotate|${user.id}`;
+    const lock = limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const { currentPassword, newPassword } = req.body || {};
+    if (!security.isPassword(currentPassword) || !db.verifyPassword(currentPassword, user.passwordHash)) {
+      limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Your current password is incorrect.' });
+    }
+    limits.loginFail.reset(failKey);
+    const weak = security.passwordProblem(newPassword, user.email);
+    if (weak) return res.status(400).json({ error: weak });
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: 'Choose a password different from the current one.' });
+    }
+    await db.setPassword(user.id, newPassword, { ownChoice: true });
+    const { deletedCount } = await sessionsCol.deleteMany({
+      'session.userId': user.id,
+      _id: { $ne: req.sessionID },
+    });
+    res.json({ ok: true, otherSessionsEnded: deletedCount });
   }));
 
   // --- Device management (owner only, scoped to the session's user) -------
@@ -432,6 +474,7 @@ async function main() {
       email: user.email,
       apiKeyPrefix: user.apiKeyPrefix, // full key only via /auth/reveal-key
       keyRevealable: !!user.apiKeyEnc && !user.keyRevoked,
+      mustChangePassword: !!user.mustChangePassword,
       keyLock: user.keyLock
         ? { reason: user.keyLock.reason, action: user.keyLock.action, at: user.keyLock.at, regenApproved: !!user.keyLock.regenApproved }
         : null,
@@ -463,6 +506,7 @@ async function main() {
 
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (needsOwnPassword(user, res)) return;
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
       limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
@@ -485,9 +529,9 @@ async function main() {
   // =======================================================================
 
   // The CLI asks "can this key be used right now?" It purposely does NOT
-  // require the caller to be logged in (the CLI has no cookie). It reveals a
-  // single boolean — not the owner's email, not WHY a key is unusable — so a
-  // stolen key tells an attacker as little as possible.
+  // require the caller to be logged in (the CLI has no cookie). Unknown keys
+  // get a bare {active:false}; unapproved devices only learn they need
+  // approval; only the owner's approved devices are told the reason.
   app.get('/auth/session-status', limit(limits.statusIp, byIp), wrap(async (req, res) => {
     const apiKey = readApiKey(req, res);
     if (apiKey === null) return;
@@ -502,12 +546,20 @@ async function main() {
       // Don't leak whether a key exists; just report "no session".
       return res.json({ active: false });
     }
-    const active =
-      user.keyEnabled &&
-      !user.keyLock &&
-      (await deviceApproved(user, deviceToken, req)) &&
-      (await userHasActiveSession(user.id));
-    res.json({ active });
+    // Device first: an unapproved device learns only that it needs approval
+    // (which /api/message already reveals) — never the account's state.
+    if (!(await deviceApproved(user, deviceToken, req))) {
+      return res.json({ active: false, reason: 'device_not_approved' });
+    }
+    // From an owner-approved device, say WHY the key isn't usable so the
+    // client can guide its owner instead of waiting blindly.
+    let reason = null;
+    if (user.keyLock) {
+      const org = await db.getOrg(user.orgId);
+      reason = org && !user.keyLock.regenApproved ? 'key_locked_needs_approval' : 'key_locked';
+    } else if (!user.keyEnabled) reason = 'key_disabled';
+    else if (!(await userHasActiveSession(user.id))) reason = 'no_session';
+    res.json(reason ? { active: false, reason } : { active: true });
   }));
 
   // =======================================================================
@@ -759,6 +811,7 @@ async function main() {
     if (!user || !user.orgId || user.orgRole !== 'admin') {
       return res.status(403).json({ error: 'Org admins only.' });
     }
+    if (needsOwnPassword(user, res)) return;
     const failKey = `rotate|${user.id}`;
     const lock = limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);

@@ -159,7 +159,7 @@ function renderOrgs() {
   for (const o of state.orgs) {
     const memberForm = el('form', { class: 'row' },
       el('input', { type: 'email', placeholder: 'member@company.com', required: true, maxLength: 254 }),
-      el('input', { type: 'password', placeholder: 'Initial password (8+ chars)', required: true, maxLength: 256, autocomplete: 'new-password' }),
+      el('input', { type: 'password', placeholder: 'Temporary password (member must change it)', required: true, maxLength: 256, autocomplete: 'new-password' }),
       el('button', { type: 'submit', class: 'ghost small' }, 'Add member'));
     memberForm.onsubmit = (e) => {
       e.preventDefault();

@@ -133,9 +133,10 @@ def main():
         print("Resolved.")
     elif args.cmd == "add-member":
         org_id = call("GET", "/overview")["actor"]["orgId"]
-        password = getpass.getpass("Initial password for the member (hidden): ")
+        password = getpass.getpass("Temporary password for the member (hidden; they must change it): ")
         d = call("POST", f"/orgs/{org_id}/members", {"email": args.email, "password": password})
-        print(f"Created member #{d['id']} {safe(d['email'])}. They log in and generate their own key.")
+        print(f"Created member #{d['id']} {safe(d['email'])}. They log in, set their own password, "
+              "then generate their own key.")
     elif args.cmd in ("enable", "disable"):
         d = call("POST", f"/users/{args.user_id}/key-enabled", {"enabled": args.cmd == "enable"})
         print(f"User #{d['userId']} key enabled: {d['keyEnabled']}")

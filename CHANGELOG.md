@@ -4,6 +4,30 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 
 ## 2026-10-30
 
+### Added (setup, routing, account safety)
+- **`npm run setup`:** guided, cross-platform setup.
+  - Checks Node, Python, MongoDB, Ollama, RAM, GPU and free disk.
+  - Installs small dependencies, and **asks before any large download**
+    (models, MongoDB image), defaulting to No.
+  - Skipping is fine: the built-in engine still answers.
+- `requirements.txt` for the Python clients.
+- **Coding questions go to `qwen2.5-coder:7b` by default.** A missing routed
+  model falls back to the default model; with no model, the engine answers
+  locally.
+- **Own-password rule:**
+  - Every sensitive action verifies the logged-in account's own password.
+  - Members created by an admin must set their own password before any key
+    action.
+  - New `POST /auth/change-password` (current password required; ends other
+    sessions), plus a Password card on the dashboard.
+- `session-status` gives a `reason` (`no_session`, `key_disabled`,
+  `key_locked`, `device_not_approved`) to the owner's approved devices only.
+  The CLI shows exactly what it's waiting for and can take a new key after a
+  lock without restarting.
+
+### Changed
+- The device-spray threshold is now 5 unapproved devices in 24 hours.
+
 ### Added (M1: LLM integration, in progress)
 - **Local LLM via Ollama** (`llm.js`), used only after every AAP check:
   - Default model `llama3.2:3b`, with per-category routing through
@@ -30,7 +54,7 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
 - Keys are **automatically disabled or rotated** when they look compromised
   or abused:
   - repeated use from unapproved devices (3 per day),
-  - 3+ new unapproved devices in 24 hours,
+  - 5+ new unapproved devices in 24 hours,
   - a lockout while viewing the key,
   - 50+ limit-blocked requests in a day.
 - The action (`alert` | `disable` | `rotate`, default `disable`) is set per

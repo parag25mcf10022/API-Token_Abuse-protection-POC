@@ -33,14 +33,33 @@ flowchart LR
 
 ## Quick start
 
-Requirements: Node.js 20.19+, MongoDB, and Python 3 with `requests` for the CLIs.
-Optional: [Ollama](https://ollama.com) with a model such as `llama3.2:3b` for LLM
-answers. Without it, the local engine still answers.
-
 ```bash
-npm install
-npm start                     # → http://localhost:3000
+git clone https://github.com/parag25mcf10022/API-Token_Abuse-protection-POC.git
+cd API-Token_Abuse-protection-POC
+npm run setup      # checks your machine, installs small deps, asks before big downloads
+npm start          # → http://localhost:3000
 ```
+
+### Requirements
+
+| Component | Needed for | Notes |
+|-----------|-----------|-------|
+| **Node.js 20.19+** | the server | required |
+| **MongoDB** | storage | required. Setup detects it; if Docker is available it can start `mongo:7` for you (~700 MB, asks first) |
+| **Python 3 + `requests`** | `client.py`, `org_client.py` | `pip install -r requirements.txt` (setup offers this) |
+| **Ollama** + models | LLM answers | **optional**: `llama3.2:3b` (~2 GB) for general answers, `qwen2.5-coder:7b` (~4.7 GB) for coding |
+
+`npm run setup` checks RAM, GPU and free disk space, and **asks before downloading
+any model**. Every model prompt defaults to *No*. If you skip the models, the
+**built-in engine** still answers calc/text commands, questions about AAP, and
+short coding/security/design/data tips. LLM answers switch on automatically once
+a model is installed (`ollama pull llama3.2:3b`), with no restart needed. If the
+coding model is missing, coding questions use the default model.
+
+Non-interactive: `npm run setup -- --no-input --skip-models` · accept everything:
+`npm run setup -- --yes`.
+
+### First run
 
 On first boot the server creates a super admin and a demo user and prints
 their generated passwords **once**. You can set them instead with
@@ -50,9 +69,11 @@ their generated passwords **once**. You can set them instead with
    view it again later with **Show key** and your password.
 2. Run the client and approve its pairing code on your dashboard:
    ```bash
-   pip install requests
    AAP_API_KEY=ak_... python3 client.py
    ```
+   While it waits, the client says exactly what's missing: device approval,
+   login, admin enable, or a locked key, in which case you can paste the new
+   key right in the client.
 3. Chat. Replies stream in, with `/help` for commands. Log out in the browser and
    the key stops working.
 
@@ -61,7 +82,7 @@ their generated passwords **once**. You can set them instead with
   ┌ javascript
   │ const apiKeyMiddleware = (req, res, next) => { … }
   └
-  ↳ coding · llm · llama3.2:3b · 655 tok · 7.0s
+  ↳ coding · llm · qwen2.5-coder:7b · 370 tok · 14.5s
 ```
 
 CLI extras: `/usage` (meters against your limits), `/model`, `/device`, `/clear`,
@@ -76,10 +97,11 @@ CLI extras: `/usage` (meters against your limits), `/model`, `/device`, `/clear`
 | **Key handling** | Keys are checked by SHA-256 hash and stored encrypted (AES-256-GCM, with the encryption key outside the DB). Owners can **view** or **rotate** their key with their password. Keys travel only in headers. |
 | **Key viewing** | Needs a live session and the current password. 3 wrong passwords lock viewing for 15 minutes, end the session and alert admins. At most 10 views per hour. The key auto-hides after 30 seconds. |
 | **Organizations** | Super admin → org admins → members, each with their own key. |
+| **Own-password rule** | Every sensitive action (view, generate or rotate a key, protection setting, master key, password change) checks **the logged-in account's own password**, never anyone else's. Members added by an admin get a temporary password and must set their own before any key action, so admins never know member passwords. Changing your password logs out your other sessions. |
 | **Org master key** | For management only. It works only from an org admin's approved device while that admin is logged in. Used with `org_client.py`. |
 | **Scopes** | Each message is classified as `general`, `math`, `text`, `coding`, `cyber`, `design` or `data`, and is allowed only if it's within the key's scopes. |
 | **Usage limits** | Requests per minute, day and month; tokens per day and month; daily caps per category. Set per user and per org pool, by admins only. |
-| **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 3+ new unapproved devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
+| **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 5+ new unapproved devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
 | **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
@@ -109,9 +131,10 @@ rejected.
 | POST | `/auth/reveal-key` | session + password | View your current key (lockout + quota) |
 | POST | `/auth/rotate-key` | session + password | New API key; old one dies (locked org members need approval) |
 | POST | `/auth/protection` | session + password | Personal accounts: action on compromise |
+| POST | `/auth/change-password` | session + current password | Set a new password; ends other sessions |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
-| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}` |
+| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active}`, plus a `reason` only for the owner's approved devices |
 | POST | `/api/message` | `X-API-Key`, `X-AAP-Device` | Protected endpoint; `stream: true` for NDJSON, optional `history` |
 | GET | `/api/usage` · `/api/engine` | `X-API-Key`, `X-AAP-Device` | Your limits/usage · engine status |
 | * | `/api/admin/*` | admin session | Admin API |
@@ -129,7 +152,7 @@ rejected.
 | `LLM_PROVIDER` | `ollama` | `ollama` or `none` (local engine only) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
 | `LLM_MODEL` | `llama3.2:3b` | Default model |
-| `LLM_MODEL_<CATEGORY>` | — | Per-category model, e.g. `LLM_MODEL_CODING=qwen2.5-coder:7b` |
+| `LLM_MODEL_<CATEGORY>` | coding: `qwen2.5-coder:7b` | Per-category model; `none` = use the default model |
 | `LLM_MAX_TOKENS` / `LLM_TIMEOUT_MS` | `1024` / `90000` | Reply cap and timeout |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / random | Seeded super admin |
 | `DEMO_USER_EMAIL` / `DEMO_USER_PASSWORD` | `user@example.com` / random | Seeded demo user |
@@ -151,6 +174,8 @@ engine.js        Response engine: rules, FAQ, LLM, content classifier
 llm.js           Ollama client: streaming, model routing, system prompts
 public/          Dashboard and admin panel (no inline scripts)
 client.py        Shell client
+scripts/setup.js Guided setup (checks system, asks before downloads)
+requirements.txt Python dependencies for the CLIs
 org_client.py    Org management CLI
 ```
 

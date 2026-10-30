@@ -26,7 +26,7 @@ const DEFAULT_ACTION = 'disable';
 
 const THRESHOLDS = {
   unapproved_device_use: 3, // message attempts from unapproved devices per day
-  device_spray: 3, // new, still-unapproved devices per 24 h
+  device_spray: 5, // new, still-unapproved devices per 24 h
   limit_abuse: 50, // limit-blocked requests per day
 };
 

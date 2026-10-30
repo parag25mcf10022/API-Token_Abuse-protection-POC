@@ -80,6 +80,12 @@
         </div>
       </div>
 
+      <div id="pw-banner" class="callout danger hidden">
+        <strong>Set your own password.</strong>
+        Your admin chose your current password, so key actions are paused until you
+        replace it in the <strong>Password</strong> card below. Only you will know the new one.
+      </div>
+
       <div id="lock-banner" class="callout danger hidden">
         <strong>Your API key was locked automatically.</strong>
         <span id="lock-text"></span>
@@ -112,7 +118,7 @@
             after that, <strong>Show key</strong> works any time.
           </p>
           <form id="rotate-form" class="row">
-            <input type="password" id="rotate-password" placeholder="Current password"
+            <input type="password" id="rotate-password" placeholder="Your password"
                    autocomplete="current-password" maxlength="256" required />
             <button type="button" id="reveal-btn" class="ghost small">Show key</button>
             <button type="submit" class="ghost small">Generate new key</button>
@@ -153,7 +159,7 @@
               <option value="rotate">Rotate: revoke the old key for good</option>
               <option value="alert">Alert only</option>
             </select>
-            <input type="password" id="protection-password" placeholder="Current password"
+            <input type="password" id="protection-password" placeholder="Your password"
                    autocomplete="current-password" maxlength="256" required />
             <button type="submit" class="ghost small">Save</button>
           </form>
@@ -170,6 +176,22 @@
           <div id="plan-scopes" class="chips"></div>
           <div id="usage-meters" class="meters"></div>
           <p id="plan-limits" class="muted small"></p>
+        </section>
+
+        <!-- PASSWORD -->
+        <section id="password-card" class="card span-2">
+          <div class="card-head">
+            <h2>Password</h2>
+            <span class="muted small">Only your own current password is ever accepted here</span>
+          </div>
+          <form id="password-form" class="row">
+            <input type="password" id="pw-current" placeholder="Current password" autocomplete="current-password" maxlength="256" required />
+            <input type="password" id="pw-new" placeholder="New password (8+ chars)" autocomplete="new-password" maxlength="256" required />
+            <input type="password" id="pw-confirm" placeholder="Repeat new password" autocomplete="new-password" maxlength="256" required />
+            <button type="submit" class="ghost small">Change password</button>
+          </form>
+          <p id="pw-msg" class="small"></p>
+          <p id="pw-error" class="error"></p>
         </section>
 
         <!-- ENGINE -->
@@ -215,7 +237,7 @@
             Copy this master key now — it is stored only as a hash and won't be shown again.
           </p>
           <form id="master-form" class="row">
-            <input type="password" id="master-password" placeholder="Current password"
+            <input type="password" id="master-password" placeholder="Your password"
                    autocomplete="current-password" maxlength="256" required />
             <button type="submit" class="ghost small">Generate master key</button>
           </form>

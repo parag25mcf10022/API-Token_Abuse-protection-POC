@@ -116,6 +116,10 @@ class Spinner:
     def __init__(self, label):
         self.label, self._stop, self._t = label, threading.Event(), None
 
+    def set(self, label):
+        """Change the label while spinning (e.g. what we're waiting for)."""
+        self.label = label
+
     def __enter__(self):
         if COLOR:
             self._t = threading.Thread(target=self._run, daemon=True)
@@ -126,7 +130,7 @@ class Spinner:
         for frame in itertools.cycle(self.FRAMES):
             if self._stop.is_set():
                 break
-            sys.stdout.write(f"\r  {violet(frame)} {dim(self.label)}")
+            sys.stdout.write(f"\r\033[2K  {violet(frame)} {dim(self.label)}")
             sys.stdout.flush()
             time.sleep(0.09)
 
@@ -314,42 +318,92 @@ class Client:
         return requests.get(f"{self.base}{path}", headers=self.headers(), timeout=timeout)
 
     def session_active(self):
-        """(active, retry_after) — active is None if the server is unreachable."""
+        """(active, retry_after, reason). active is None if the server is unreachable.
+        reason (only for this owner's approved devices) says what's missing."""
         try:
             r = self.get("/auth/session-status", timeout=5)
         except requests.RequestException:
-            return None, 0
+            return None, 0, None
         if r.status_code == 429:
-            return False, int(r.headers.get("Retry-After", "10"))
+            return False, int(r.headers.get("Retry-After", "10")), None
         try:
-            return bool(r.json().get("active")), 0
+            d = r.json()
         except ValueError:
-            return None, 0
+            return None, 0, None
+        return bool(d.get("active")), 0, d.get("reason")
+
+
+def waiting_text(reason, base):
+    """What we're waiting for, in plain words (shown next to the spinner)."""
+    code = device_code(DEVICE_TOKEN)
+    return {
+        "device_not_approved": f"approve device {code} on your dashboard ({base})",
+        "no_session": f"log in to the web app at {base}",
+        "key_disabled": "an admin must enable your key",
+        "key_locked_needs_approval": "key locked — waiting for your org admin to approve regeneration",
+    }.get(reason, f"waiting for the server ({base})")
+
+
+def recover_locked_key(client):
+    """The key was auto-locked: guide the owner to a new key, then use it."""
+    print()
+    print(f"  {BAD} {bold('Your key was locked automatically')} after suspected compromise or abuse.")
+    print(f"      {INFO} Log in at {ACCENT(client.base)} and click {bold('Generate new key')} (your password).")
+    print(f"      {INFO} Or ask an admin to unlock it if this was a false alarm.")
+    if not sys.stdin.isatty():
+        return False
+    try:
+        new_key = getpass.getpass("  Paste the new key (hidden), or press Enter to keep waiting: ").strip()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    if new_key:
+        client.api_key = new_key
+        print(f"  {OK} Using the new key.")
+    return True
 
 
 def wait_for_session(client, quiet=False):
-    """Block until the key is usable. Returns True, or False if unreachable."""
-    active, _ = client.session_active()
+    """Block until the key is usable, explaining what's missing as it changes.
+    Returns True when active, False if the server is unreachable or on Ctrl-C."""
+    active, _, reason = client.session_active()
     if active is None:
         print(f"  {BAD} Can't reach the server at {client.base}")
         return False
     if active:
         return True
-    if not quiet:
-        print(f"  {WARN} {bold('Key not usable yet.')} The server checks that:")
-        print(f"      {INFO} you're logged in at {ACCENT(client.base)}")
-        print(f"      {INFO} this device ({bold(device_code(DEVICE_TOKEN))}) is approved on your dashboard")
-        print(f"      {INFO} an admin has enabled your key, and it isn't locked")
+    if not quiet and reason in ("device_not_approved", "no_session", None):
         try:
             webbrowser.open(client.base)
         except Exception:
             pass
-    with Spinner("waiting — log in / approve the device · Ctrl-C to cancel"):
-        while True:
-            active, retry = client.session_active()
-            if active:
-                break
-            time.sleep(max(2, retry))
+    shown = None
+    try:
+        while not active:
+            if reason == "key_locked":
+                if not recover_locked_key(client):
+                    return False
+                active, _, reason = client.session_active()
+                continue
+            label = waiting_text(reason, client.base)
+            if label != shown:
+                if not COLOR:
+                    print(f"  {WARN} {label}")
+                shown = label
+            with Spinner(label + " · Ctrl-C to cancel") as spin:
+                while True:
+                    time.sleep(2)
+                    active, retry, new_reason = client.session_active()
+                    if retry:
+                        time.sleep(retry)
+                    if active or new_reason != reason:
+                        reason = new_reason
+                        break
+                    spin.set(label + " · Ctrl-C to cancel")
+            if not active and COLOR:
+                print(f"  {OK} {dim(shown)}")  # that step is done; the next one is shown
+    except KeyboardInterrupt:
+        print()
+        return False
     print(f"  {OK} Key is active.")
     return True
 
@@ -529,8 +583,10 @@ def repl(client, stream):
         if ok:
             history += [{"role": "user", "content": line}, {"role": "assistant", "content": reply}]
             del history[:-MAX_HISTORY]
-        elif status == 401 and wait_for_session(client, quiet=True):
-            print(dim("  Session restored — send your message again."))
+        elif status in (401, 403) and wait_for_session(client, quiet=True):
+            # Logged out, device removed, key disabled or locked: wait_for_session
+            # explains what's missing and resumes once it's fixed.
+            print(dim("  Ready again — send your message again."))
 
 
 # --- Entry point ------------------------------------------------------------------

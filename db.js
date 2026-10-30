@@ -167,7 +167,14 @@ async function nextId(seq = 'userId') {
 async function createUser(
   email,
   password,
-  { isAdmin = false, keyEnabled = false, orgId = null, orgRole = null, policy = null } = {}
+  {
+    isAdmin = false,
+    keyEnabled = false,
+    orgId = null,
+    orgRole = null,
+    policy = null,
+    mustChangePassword = false, // set when someone else chose the password
+  } = {}
 ) {
   email = email.trim().toLowerCase();
   // Deliberately vague: don't confirm whether an email is registered.
@@ -189,6 +196,7 @@ async function createUser(
     orgId,
     orgRole, // 'admin' | 'member' | null
     policy: policy || DEFAULT_USER_POLICY,
+    mustChangePassword: !!mustChangePassword,
     knownIps: [],
     createdAt: new Date().toISOString(),
   };
@@ -253,12 +261,14 @@ function listUsers() {
   return users.find().sort({ id: 1 }).toArray();
 }
 
-/** Replace a user's password (new salt + hash). */
-async function setPassword(userId, password) {
-  await users.updateOne(
-    { id: Number(userId) },
-    { $set: { passwordHash: hashPassword(password) } }
-  );
+/**
+ * Replace a user's password (new salt + hash). `ownChoice` marks that the
+ * account owner chose it, clearing any "must change password" requirement.
+ */
+async function setPassword(userId, password, { ownChoice = false } = {}) {
+  const $set = { passwordHash: hashPassword(password) };
+  if (ownChoice) $set.mustChangePassword = false;
+  await users.updateOne({ id: Number(userId) }, { $set });
 }
 
 // --- Devices ---------------------------------------------------------------

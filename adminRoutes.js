@@ -207,6 +207,9 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
     try {
       user = await db.createUser(e.value, password, {
         keyEnabled: true, // approved by the org admin who created them
+        // The admin chose this password, so the member must replace it with
+        // their own before any key action — admins never know member passwords.
+        mustChangePassword: true,
         orgId: org.id,
         orgRole: 'member',
         policy: org.memberDefaults,
@@ -215,7 +218,7 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       return res.status(409).json({ error: err.message });
     }
     await db.revokeApiKey(user.id); // no usable key until the member generates one
-    res.json({ id: user.id, email: user.email, orgId: org.id });
+    res.json({ id: user.id, email: user.email, orgId: org.id, mustChangePassword: true });
   }));
 
   // --- super admin only --------------------------------------------------------
