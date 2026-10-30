@@ -69,12 +69,20 @@ npm start
 # → http://localhost:3000
 ```
 
-On first boot it seeds two accounts (idempotent — re-runs won't duplicate them).
+On first boot it seeds two accounts (idempotent — re-runs won't duplicate them):
+an admin and a normal user. **No passwords are hard-coded.** Set them with env
+vars, or leave them unset and the server generates random passwords and prints
+them **once** in the console when the accounts are created:
 
-Seeded accounts:
+| Env var              | Default             |
+|----------------------|---------------------|
+| `ADMIN_EMAIL`        | `admin@example.com` |
+| `ADMIN_PASSWORD`     | random, shown once  |
+| `DEMO_USER_EMAIL`    | `user@example.com`  |
+| `DEMO_USER_PASSWORD` | random, shown once  |
 
-- `admin@example.com` / `admin123` (admin)
-- `user@example.com` / `user123`
+Accounts created by older versions with the old published default passwords
+are rotated to new random passwords on the next boot.
 
 You can also sign up a fresh account on the page. **New accounts start with
 their API key disabled**: an admin has to enable it in the admin panel

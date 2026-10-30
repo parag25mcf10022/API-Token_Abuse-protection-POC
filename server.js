@@ -14,6 +14,7 @@
  * Storage: MongoDB, database "AAP" (users + sessions), inspectable in Compass.
  */
 
+const crypto = require('crypto');
 const path = require('path');
 const express = require('express');
 const session = require('express-session');
@@ -348,26 +349,69 @@ async function main() {
 
   // --- Seed a demo admin + a normal user (idempotent) ---------------------
   // Demo accounts are pre-approved; real signups need an admin to enable them.
-  await seedIfMissing('admin@example.com', 'admin123', { isAdmin: true, keyEnabled: true });
-  await seedIfMissing('user@example.com', 'user123', { keyEnabled: true });
+  // Passwords come from env vars, or are generated randomly and printed ONCE
+  // when the account is created — never hard-coded or published.
+  const seeded = [
+    await seedAccount(
+      process.env.ADMIN_EMAIL || 'admin@example.com',
+      process.env.ADMIN_PASSWORD,
+      { isAdmin: true, keyEnabled: true }
+    ),
+    await seedAccount(
+      process.env.DEMO_USER_EMAIL || 'user@example.com',
+      process.env.DEMO_USER_PASSWORD,
+      { keyEnabled: true }
+    ),
+  ];
 
   app.listen(PORT, () => {
     console.log(`\nAAP demo running → http://localhost:${PORT}`);
-    console.log(`MongoDB: database "${db.getDbName()}" @ mongodb://localhost:27017`);
-    console.log('Seeded accounts:');
-    console.log('  admin@example.com / admin123  (admin)');
-    console.log('  user@example.com  / user123\n');
+    console.log(`MongoDB: database "${db.getDbName()}"`);
+    const fresh = seeded.filter((s) => s.generatedPassword);
+    if (fresh.length) {
+      console.log('\nGenerated credentials (shown once — save them now):');
+      for (const s of fresh) {
+        console.log(`  ${s.email} / ${s.generatedPassword}${s.isAdmin ? '  (admin)' : ''}`);
+      }
+    }
+    console.log('');
   });
 }
 
-async function seedIfMissing(email, password, opts) {
-  if (!(await db.getUserByEmail(email))) {
+// Passwords that older versions of this demo seeded and published in the
+// README. Any account still using one is rotated on boot.
+const LEGACY_DEFAULT_PASSWORDS = ['admin123', 'user123'];
+
+function randomPassword() {
+  return crypto.randomBytes(12).toString('base64url');
+}
+
+/**
+ * Create the account if missing. If it exists but still has a legacy
+ * published password, rotate it. Returns the plaintext password only when
+ * it was generated here (so it can be shown once), never otherwise.
+ */
+async function seedAccount(email, envPassword, opts) {
+  const existing = await db.getUserByEmail(email);
+  if (!existing) {
+    const password = envPassword || randomPassword();
     await db.createUser(email, password, opts);
+    return { email, isAdmin: !!opts.isAdmin, generatedPassword: envPassword ? null : password };
   }
+  const legacy = LEGACY_DEFAULT_PASSWORDS.some((p) =>
+    db.verifyPassword(p, existing.passwordHash)
+  );
+  if (legacy) {
+    const password = envPassword || randomPassword();
+    await db.setPassword(existing.id, password);
+    console.warn(`Rotated published default password for ${email}.`);
+    return { email, isAdmin: existing.isAdmin, generatedPassword: envPassword ? null : password };
+  }
+  return { email, isAdmin: existing.isAdmin, generatedPassword: null };
 }
 
 main().catch((err) => {
   console.error('Failed to start AAP server:', err.message);
-  console.error('Is MongoDB running on mongodb://localhost:27017 ?');
+  console.error('Is MongoDB running and reachable (MONGO_URL)?');
   process.exit(1);
 });

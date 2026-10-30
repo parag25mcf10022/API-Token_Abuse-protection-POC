@@ -122,6 +122,14 @@ function listUsers() {
   return users.find().sort({ id: 1 }).toArray();
 }
 
+/** Replace a user's password (new salt + hash). */
+async function setPassword(userId, password) {
+  await users.updateOne(
+    { id: Number(userId) },
+    { $set: { passwordHash: hashPassword(password) } }
+  );
+}
+
 /** Admin helper: flip a user's API key on/off. Returns the new state. */
 async function setKeyEnabled(userId, enabled) {
   const doc = await users.findOneAndUpdate(
@@ -144,6 +152,7 @@ module.exports = {
   getUserByApiKey,
   listUsers,
   setKeyEnabled,
+  setPassword,
   verifyPassword,
   generateApiKey,
 };
