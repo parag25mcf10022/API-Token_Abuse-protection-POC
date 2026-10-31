@@ -31,10 +31,22 @@ All notable changes to this project. Dates are in YYYY-MM-DD.
     each CLI reply shows its cost and cached tokens. `/api/message` returns
     `costUsd` and `cache`.
 
+  - Tested against a mock of the Anthropic API (streaming, caching, fallback
+    and refusal paths, cost). Not yet tested with a real API key.
+
 ### Changed
 - Token metering counts cached input tokens too, so caching lowers cost
   without changing quotas.
 - Milestone 1 is complete.
+
+### Security
+- Fixed all `npm audit` findings (0 left):
+  - Express 4.22.3, which brings `qs` 6.16.2 (DoS fixes);
+  - `body-parser` 1.20.9 (body-size and DoS fixes);
+  - `proxy-addr` 2.0.8 (IP spoofing through IPv4-mapped IPv6 trust
+    subnets).
+- Checked afterwards: login, NoSQL operator-injection rejection, 413 for
+  oversized bodies, and nested query strings all behave as before.
 
 ## 2026-10-30
 

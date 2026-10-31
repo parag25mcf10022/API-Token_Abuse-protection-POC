@@ -302,8 +302,8 @@ flowchart LR
 
 | Milestone | Goal | Key deliverables | Status |
 |-----------|------|------------------|--------|
-| **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ✅ hosted provider (Claude) with prompt caching · ✅ per-model cost tracking | ✅ Done |
-| **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | 📋 Planned |
+| **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ✅ hosted provider (Claude) with prompt caching · ✅ per-model cost tracking (Claude tested against a mock API; a live-key test is still to do) | ✅ Done |
+| **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | ⏭️ Next |
 | **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | 📋 Planned · near future |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |
 | **M5 — SSO** | Enterprise onboarding | OIDC/SAML login per org; automatic member provisioning | 📋 Planned |
