@@ -188,6 +188,22 @@ function renderUsage(user) {
     usageRow('Tokens today', u.today.tokens, l.tokensPerDay),
     usageRow('Tokens this month', u.month.tokens, l.tokensPerMonth)
   );
+  // Hosted models (Claude) cost money; show the spend once there is some.
+  if (u.month.costUsd > 0) {
+    const usd = (n) => (n < 0.01 ? `$${n.toFixed(5)}` : `$${n.toFixed(2)}`);
+    const row = document.createElement('div');
+    row.className = 'meter-row';
+    const head = document.createElement('div');
+    head.className = 'meter-head';
+    const name = document.createElement('span');
+    name.textContent = 'Model spend';
+    const nums = document.createElement('span');
+    nums.className = 'muted';
+    nums.textContent = `${usd(u.today.costUsd)} today · ${usd(u.month.costUsd)} this month`;
+    head.append(name, nums);
+    row.append(head);
+    $('usage-meters').append(row);
+  }
 }
 
 // --- Categories & quotas -------------------------------------------------------

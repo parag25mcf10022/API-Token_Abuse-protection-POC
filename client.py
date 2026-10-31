@@ -442,6 +442,11 @@ HELP = [
 ]
 
 
+def usd(n):
+    """USD with enough precision for sub-cent per-request costs."""
+    return f"${n:.5f}" if n < 0.01 else f"${n:.2f}"
+
+
 def cmd_usage(client):
     r = client.get("/api/usage")
     if r.status_code != 200:
@@ -460,6 +465,8 @@ def cmd_usage(client):
         ("tokens month   ", u["month"]["tokens"], lim.get("tokensPerMonth")),
     ):
         print(f"  {dim(label)} {meter(used, cap)}")
+    if u["month"].get("costUsd"):
+        print(f"  {dim('model spend    ')} {usd(u['today'].get('costUsd', 0))} today · {usd(u['month']['costUsd'])} this month")
     cats = d.get("categories") or []
     if cats:
         cost = d.get("costPerRequest") or {}
@@ -544,7 +551,13 @@ def ask(client, message, history, stream=True):
     parts = [safe(meta.get("category", "?")), safe(meta.get("source", "?"))]
     if meta.get("model"):
         parts.append(safe(meta["model"]))
-    parts += [f"{meta.get('tokens', 0):,} tok", f"{took:.1f}s"]
+    parts.append(f"{meta.get('tokens', 0):,} tok")
+    if meta.get("costUsd"):
+        parts.append(usd(meta["costUsd"]))
+    cache = meta.get("cache") or {}
+    if cache.get("read"):
+        parts.append(f"{cache['read']:,} cached")
+    parts.append(f"{took:.1f}s")
     if meta.get("truncated"):
         parts.append(amber("truncated — ask me to continue"))
     print(dim("  ↳ " + " · ".join(parts)))

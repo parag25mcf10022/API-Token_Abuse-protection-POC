@@ -2,6 +2,40 @@
 
 All notable changes to this project. Dates are in YYYY-MM-DD.
 
+## 2026-10-31
+
+### Added (M1: Claude provider and cost tracking)
+- **Claude as a hosted LLM provider** (`llm.js`, official `@anthropic-ai/sdk`):
+  - Any model id starting with `claude-` is served by Anthropic, so Claude
+    can be the default (`LLM_PROVIDER=anthropic`, default `claude-opus-5-5`)
+    or serve chosen categories alongside Ollama (`LLM_MODEL_CODING=...`).
+  - Used only when `ANTHROPIC_API_KEY` is set; otherwise Claude routes fall
+    back to the default model. The key is never shown in engine status.
+  - Streams like Ollama; `CLAUDE_EFFORT` (default `medium`) and
+    `CLAUDE_MAX_TOKENS` (default 16000, thinking included).
+  - **Prompt caching** of the conversation prefix, so follow-up turns re-read
+    it at the cache price. System prompts stay byte-stable for this.
+  - **Refusal fallbacks:** if a safety classifier declines, Anthropic retries
+    on its recommended model in the same call (`fallbacks: "default"`; not
+    sent for Haiku). If everything declines, the engine answers locally.
+- **Per-model cost tracking** (`pricing.js`):
+  - Each request's USD cost is computed from real usage, including cache
+    reads and writes, with every attempt priced at its own model's rate.
+    Local models cost $0; unknown models are counted as "unpriced".
+  - `LLM_PRICES` overrides or adds prices.
+  - Usage buckets record cost per category and requests, tokens and cost per
+    model. Spend from declined requests is counted too.
+  - The **admin cost guide** shows spend per model for the last 30 days and
+    a daily cost estimate per category quota.
+  - The **dashboard** and CLI `/usage` show today's and this month's spend;
+    each CLI reply shows its cost and cached tokens. `/api/message` returns
+    `costUsd` and `cache`.
+
+### Changed
+- Token metering counts cached input tokens too, so caching lowers cost
+  without changing quotas.
+- Milestone 1 is complete.
+
 ## 2026-10-30
 
 ### Changed (independent per-category quotas, cost guide)

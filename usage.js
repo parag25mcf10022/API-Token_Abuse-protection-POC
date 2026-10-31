@@ -3,8 +3,10 @@
  *
  * Counters are kept per subject (a user "u:<id>" or an org "o:<id>") in UTC
  * buckets — minute, day, month — each document holding
- * { requests, tokens, cat: { <category>: requests }, ctok: { <category>: tokens } }. A TTL index drops old
- * buckets automatically.
+ * { requests, tokens, cat: { <category>: requests }, ctok: { <category>: tokens } }, plus cost
+ * tracking: cost (micro-USD), ccost: { <category>: micro-USD } and
+ * mod: { <model>: { requests, tokens, cost, unpriced } }. A TTL index drops
+ * old buckets automatically.
  *
  * check() runs before the request is processed and record() after, so under
  * heavy concurrency a subject can overshoot a limit by a few in-flight
@@ -108,10 +110,34 @@ async function check(user, org, category, estTokens) {
   return { ok: true };
 }
 
-/** Count a completed request against the user (and org) buckets. */
-async function record(user, org, category, tokens) {
+// Model names ("llama3.2:3b") become Mongo field names, which can't hold
+// "." or "$".
+const encodeModel = (m) => String(m).replace(/%/g, '%25').replace(/\./g, '%2E').replace(/\$/g, '%24');
+const decodeModel = (k) => k.replace(/%2E/g, '.').replace(/%24/g, '$').replace(/%25/g, '%');
+const toMicro = (usd) => Math.round(usd * 1e6);
+
+/**
+ * Count a completed request against the user (and org) buckets. When a
+ * model answered, `spend` is { model, cost } with cost in USD (null when the
+ * model's price is unknown).
+ */
+async function record(user, org, category, tokens, spend = null) {
   const now = new Date();
   const b = buckets(now);
+  const inc = { requests: 1, tokens, [`cat.${category}`]: 1, [`ctok.${category}`]: tokens };
+  if (spend && spend.model) {
+    const m = `mod.${encodeModel(spend.model)}`;
+    inc[`${m}.requests`] = 1;
+    inc[`${m}.tokens`] = tokens;
+    if (spend.cost === null || spend.cost === undefined) {
+      inc[`${m}.unpriced`] = 1;
+    } else if (spend.cost > 0) {
+      const micro = toMicro(spend.cost);
+      inc.cost = micro;
+      inc[`ccost.${category}`] = micro;
+      inc[`${m}.cost`] = micro;
+    }
+  }
   const ops = [];
   for (const s of subjects(user, org)) {
     for (const x of Object.values(b)) {
@@ -119,7 +145,7 @@ async function record(user, org, category, tokens) {
         updateOne: {
           filter: { _id: `${s.key}|${x.id}` },
           update: {
-            $inc: { requests: 1, tokens, [`cat.${category}`]: 1, [`ctok.${category}`]: tokens },
+            $inc: inc,
             $setOnInsert: { expiresAt: new Date(now.getTime() + x.ttl) },
           },
           upsert: true,
@@ -205,15 +231,27 @@ async function costGuide({ maxReplyTokens, maxMessageChars, maxHistoryChars }) {
   if (guideCache.value && Date.now() - guideCache.at < 60000) return guideCache.value;
   const since = new Date(Date.now() - 30 * DAY_MS).toISOString().slice(0, 10);
   const docs = await usage
-    .find({ _id: { $regex: /^u:\d+\|D:/ }, ctok: { $exists: true } }, { projection: { _id: 1, cat: 1, ctok: 1 } })
+    .find(
+      { _id: { $regex: /^u:\d+\|D:/ }, ctok: { $exists: true } },
+      { projection: { _id: 1, cat: 1, ctok: 1, ccost: 1, mod: 1 } }
+    )
     .toArray();
   const totals = {};
+  const models = {};
   for (const d of docs) {
     if (d._id.split('|D:')[1] < since) continue;
     for (const [cat, tok] of Object.entries(d.ctok || {})) {
-      const t = (totals[cat] = totals[cat] || { requests: 0, tokens: 0 });
+      const t = (totals[cat] = totals[cat] || { requests: 0, tokens: 0, cost: 0 });
       t.tokens += tok;
       t.requests += (d.cat || {})[cat] || 0;
+      t.cost += (d.ccost || {})[cat] || 0;
+    }
+    for (const [key, v] of Object.entries(d.mod || {})) {
+      const m = (models[decodeModel(key)] = models[decodeModel(key)] || { requests: 0, tokens: 0, cost: 0, unpriced: 0 });
+      m.requests += v.requests || 0;
+      m.tokens += v.tokens || 0;
+      m.cost += v.cost || 0;
+      m.unpriced += v.unpriced || 0;
     }
   }
   const systemPrompt = 150; // approx. system prompt tokens sent with LLM requests
@@ -226,14 +264,29 @@ async function costGuide({ maxReplyTokens, maxMessageChars, maxHistoryChars }) {
       avgTokens: observed !== null ? observed : typical,
       source: observed !== null ? 'observed' : 'estimate',
       samples: t ? t.requests : 0,
+      avgCostUsd: t && t.requests ? t.cost / t.requests / 1e6 : 0,
+      costUsd30d: t ? t.cost / 1e6 : 0,
     };
   }
+  // Spend per model over the same 30 days (all users), most expensive first.
+  const modelSpend = Object.entries(models)
+    .map(([model, m]) => ({
+      model,
+      requests: m.requests,
+      tokens: m.tokens,
+      costUsd: m.cost / 1e6,
+      avgCostUsd: m.requests ? m.cost / m.requests / 1e6 : 0,
+      unpriced: m.unpriced,
+    }))
+    .sort((a, b) => b.costUsd - a.costUsd || b.requests - a.requests);
   const value = {
     categories,
     localRange: [5, 60], // rules / FAQ answers
     llmRange: [250, Math.min(maxReplyTokens + 300, 1500)], // typical model answers
     worstCase,
     maxReplyTokens,
+    models: modelSpend,
+    totalCostUsd30d: modelSpend.reduce((sum, m) => sum + m.costUsd, 0),
     note: 'Tokens ≈ characters ÷ 4, counted for the message, any chat history sent, and the reply.',
   };
   guideCache = { at: Date.now(), value };
@@ -248,6 +301,10 @@ async function summary(subjectKey) {
     tokens: d.tokens || 0,
     byCategory: d.cat || {},
     tokensByCategory: d.ctok || {},
+    costUsd: (d.cost || 0) / 1e6,
+    byModel: Object.fromEntries(
+      Object.entries(d.mod || {}).map(([k, v]) => [decodeModel(k), { requests: v.requests || 0, costUsd: (v.cost || 0) / 1e6 }])
+    ),
   });
   return { today: pick(c.day), month: pick(c.month) };
 }

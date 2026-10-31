@@ -341,6 +341,7 @@ function faqMatch(norm, entries = FAQ, minHits = 3) {
  * @param {Array}  [opts.history]   prior turns [{role, content}] for multi-turn chat
  * @param {function(string)} [opts.onDelta] receives streamed text
  * @returns {Promise<{reply, source, model?, usage?}>}
+ *   usage = { input, output, cacheRead, cacheWrite, cost } when a model ran
  *   source ∈ "rule" | "faq" | "cache" | "llm" | "fallback"
  */
 async function generate(message, opts = {}) {
@@ -377,6 +378,7 @@ async function generate(message, opts = {}) {
   }
 
   // 4. LLM (streamed). Falls through to local answers on any failure.
+  let spent = null;
   if (opts.llm) {
     try {
       const out = await opts.llm.chat({
@@ -388,20 +390,22 @@ async function generate(message, opts = {}) {
       if (cacheable) cacheSet(norm, { reply: out.reply, source: 'llm' });
       return { reply: out.reply, source: 'llm', model: out.model, usage: out.usage, truncated: !!out.truncated };
     } catch (e) {
-      // LLM down/slow → local tips or fallback below
+      // LLM down/slow/declined → local tips or fallback below. A declined
+      // hosted request can still be billed, so its usage is passed on.
+      if (e.usage) spent = { model: e.model, usage: e.usage };
     }
   }
 
   // 5. local category tips (coding / cyber / design / data)
   const tip = faqMatch(norm, CATEGORY_KB, 1);
   if (tip) {
-    if (cacheable) cacheSet(norm, { reply: tip.answer, source: 'faq' });
-    return { reply: tip.answer, source: 'faq' };
+    if (cacheable && !spent) cacheSet(norm, { reply: tip.answer, source: 'faq' });
+    return { reply: tip.answer, source: 'faq', ...spent };
   }
 
   // 6. cheap reflective fallback
   const reply = `I don't have a canned answer for that. You said: "${raw}". Type "help" for what I can do.`;
-  return { reply, source: 'fallback' };
+  return { reply, source: 'fallback', ...spent };
 }
 
 module.exports = { generate, classify, safeCalc, _cache: cache };

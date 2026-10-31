@@ -112,6 +112,20 @@ ollama pull qwen2.5-coder:7b   # ~4.7 GB — coding questions (optional)
 Models can be added later. The server picks them up within a minute, with no
 restart. If the coding model is missing, coding questions use the default model.
 
+**Or use Claude (hosted, paid).** Set `ANTHROPIC_API_KEY` and either make
+Claude the default or route only some categories to it:
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...           # never commit this
+LLM_PROVIDER=anthropic npm start              # Claude (claude-opus-5-5) for everything
+LLM_MODEL_CODING=claude-sonnet-5-5 npm start  # local Ollama, Claude for coding only
+```
+
+Prompts sent to a Claude model leave the machine and are billed by Anthropic.
+Each request's cost is recorded per model and shown to admins in the cost
+guide, to users on the dashboard, and in the CLI. Without a key, Claude routes
+fall back to the default model.
+
 ### Start the server
 
 ```bash
@@ -182,7 +196,7 @@ CLI extras: `/usage` (quotas per category), `/model`, `/device`, `/clear`,
 | **Quotas & notifications** | The dashboard lists every category with its own daily request and token quota, usage, remaining allowance, typical cost per request, and **why** a category is unavailable (not in your plan, blocked by your org, quota 0, used up). You're notified at **50%, 75%, 90% and 99%** of any quota, on the dashboard (with a pop-up while it's open) and inline in the CLI. Org-pool warnings reach every member. |
 | **Context-aware classification** | Natural questions ("what's 2+3?", "summarize this", "center a div") land in the right category. Short follow-ups ("explain it more simply") keep the conversation's category; unrelated questions don't, even with a forged history. Blocked messages say which category they were put in and which ones you're allowed. |
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
-| **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
+| **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Claude models can be the default or serve chosen categories, with prompt caching, automatic refusal fallbacks and per-model cost tracking. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
 
 ## Org management (master key)
@@ -229,11 +243,15 @@ rejected.
 | `SESSION_SECRET` | generated, stored in DB | Cookie signing |
 | `KEY_ENCRYPTION_KEY` | generated in `.secrets/` (git-ignored) | 64-hex key that encrypts stored API keys |
 | `TRUST_PROXY` | unset | Set to `1` behind a TLS proxy |
-| `LLM_PROVIDER` | `ollama` | `ollama` or `none` (local engine only) |
+| `LLM_PROVIDER` | `ollama` | `ollama`, `anthropic` (Claude is the default model) or `none` (local engine only) |
 | `OLLAMA_URL` | `http://localhost:11434` | Ollama server |
-| `LLM_MODEL` | `llama3.2:3b` | Default model |
-| `LLM_MODEL_<CATEGORY>` | coding: `qwen2.5-coder:7b` | Per-category model; `none` = use the default model |
-| `LLM_MAX_TOKENS` / `LLM_TIMEOUT_MS` | `1024` / `90000` | Reply cap and timeout |
+| `LLM_MODEL` | `llama3.2:3b` (`claude-opus-5-5` with `anthropic`) | Default model |
+| `LLM_MODEL_<CATEGORY>` | coding: `qwen2.5-coder:7b` (Ollama only) | Per-category model from either provider (`claude-*` = Claude); `none` = use the default model |
+| `LLM_MAX_TOKENS` / `LLM_TIMEOUT_MS` | `1024` / `90000` | Ollama reply cap, and timeout for both providers |
+| `ANTHROPIC_API_KEY` | unset | Enables Claude models |
+| `CLAUDE_MAX_TOKENS` | `16000` | Claude reply cap, thinking included |
+| `CLAUDE_EFFORT` | `medium` | `low`, `medium`, `high`, `xhigh` or `max`: answer depth vs. cost |
+| `LLM_PRICES` | built-in | JSON price overrides, USD per million tokens: `{"model":{"input":4,"output":20,"cacheRead":0.2}}` |
 | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | `admin@example.com` / random | Seeded super admin |
 | `DEMO_USER_EMAIL` / `DEMO_USER_PASSWORD` | `user@example.com` / random | Seeded demo user |
 
@@ -251,7 +269,8 @@ alerts.js        Security alerts
 security.js      CSP headers, input validation
 rateLimit.js     Per-IP rate limiter
 engine.js        Response engine: rules, FAQ, LLM, content classifier
-llm.js           Ollama client: streaming, model routing, system prompts
+llm.js           LLM providers (Ollama, Claude): streaming, routing, prompts
+pricing.js       Per-model prices for cost tracking
 public/          Dashboard and admin panel (no inline scripts)
 client.py        Shell client
 scripts/setup.js Guided setup (checks system, asks before downloads)
@@ -277,12 +296,13 @@ flowchart LR
     M3 --> M4["🔔 M4<br/>Alert webhooks<br/>and audit log"]
     M4 --> M5["🏢 M5<br/>SSO for orgs"]
     M5 --> M6["📦 M6<br/>Docker and CI"]
-    style M1 fill:#4f46e5,color:#fff,stroke:#4338ca
+    style M1 fill:#16a34a,color:#fff,stroke:#15803d
+    style M2 fill:#4f46e5,color:#fff,stroke:#4338ca
 ```
 
 | Milestone | Goal | Key deliverables | Status |
 |-----------|------|------------------|--------|
-| **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ⏳ hosted providers (e.g. Claude) with prompt caching · ⏳ per-model cost tracking | 🚧 In progress |
+| **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ✅ hosted provider (Claude) with prompt caching · ✅ per-model cost tracking | ✅ Done |
 | **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | 📋 Planned |
 | **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | 📋 Planned · near future |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |
@@ -294,5 +314,5 @@ flowchart LR
 [MIT](LICENSE) © 2026 Parag Bagade.
 
 Dependencies keep their own licenses: Express, express-session and
-connect-mongo (MIT); the MongoDB Node driver and Python `requests`
-(Apache-2.0).
+connect-mongo (MIT); the MongoDB Node driver, the Anthropic SDK and Python
+`requests` (Apache-2.0).

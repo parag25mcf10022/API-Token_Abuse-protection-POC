@@ -17,6 +17,8 @@ const LIMIT_LABELS = {
 
 let guide = null; // /api/admin/cost-guide
 const fmtN = (n) => Number(n).toLocaleString();
+// USD with enough precision for sub-cent per-request costs.
+const fmtUsd = (n) => (n === 0 ? '$0' : n < 0.01 ? `$${n.toFixed(5)}` : `$${n.toFixed(2)}`);
 
 // Badge tone per alert type.
 const ALERT_TONES = {
@@ -344,6 +346,22 @@ function renderCostGuide() {
     el('span', { class: 'muted small' },
       `${guide.note} Per-category averages come from real usage once a category has 5+ requests (otherwise "est."). ` +
       'Rule of thumb: tokens/day ≈ requests/day × tokens per request × 1.25 headroom.'));
+
+  // Spend per model: hosted models (Claude) cost money, local ones are free.
+  const models = guide.models || [];
+  if (!models.length) return;
+  box.append(
+    el('br'),
+    el('strong', {}, `Model spend, last 30 days: ${fmtUsd(guide.totalCostUsd30d)}`),
+    el('table', { class: 'small' },
+      el('thead', {}, el('tr', {},
+        ...['Model', 'Requests', 'Tokens', 'Cost', 'Per request'].map((h) => el('th', {}, h)))),
+      el('tbody', {}, ...models.map((m) => el('tr', {},
+        el('td', {}, m.model),
+        el('td', {}, fmtN(m.requests)),
+        el('td', {}, fmtN(m.tokens)),
+        el('td', {}, m.unpriced ? `${fmtUsd(m.costUsd)} (+${fmtN(m.unpriced)} unpriced)` : fmtUsd(m.costUsd)),
+        el('td', {}, fmtUsd(m.avgCostUsd)))))));
 }
 
 function updateEstimates() {
@@ -368,6 +386,8 @@ function updateEstimates() {
       const need = Math.ceil(req * avg * 1.25);
       parts.push(`${fmtN(req)} requests need ≈ ${fmtN(need)} tokens`);
       if (tok !== null && tok < need) parts.push('⚠ token quota will run out first');
+      const usd = guide.categories[c].avgCostUsd;
+      if (usd > 0) parts.push(`up to ≈ ${fmtUsd(req * usd)}/day at the current model cost`);
     }
     out.textContent = parts.join(' · ');
   }

@@ -660,10 +660,11 @@ async function main() {
     return { ok: true, value: out };
   }
 
-  // What one request costs (tokens), per category — for sizing quotas.
+  // What one request costs (tokens and USD), per category and model — for
+  // sizing quotas.
   const costGuide = () =>
     usage.costGuide({
-      maxReplyTokens: llm.enabled() ? llm.config.maxTokens : 0,
+      maxReplyTokens: llm.enabled() ? llm.maxReplyTokens() : 0,
       maxMessageChars: security.LIMITS.message,
       maxHistoryChars: MAX_HISTORY_CHARS,
     });
@@ -744,12 +745,15 @@ async function main() {
       onDelta: streaming ? (text) => res.write(ndjson({ type: 'delta', text })) : undefined,
     });
 
-    // Meter real model token counts when the LLM answered. Local answers never
+    // Meter real model token counts when a model ran (cached input included,
+    // so caching saves money without changing quotas). Local answers never
     // see the history, so they're charged for the message + reply only.
-    const tokens = out.usage
-      ? out.usage.input + out.usage.output
+    const u = out.usage;
+    const tokens = u
+      ? u.input + u.output + (u.cacheRead || 0) + (u.cacheWrite || 0)
       : policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(out.reply);
-    await usage.record(user, org, category, tokens);
+    const cost = u ? (u.cost === undefined ? 0 : u.cost) : 0;
+    await usage.record(user, org, category, tokens, out.model ? { model: out.model, cost } : null);
 
     // Did this request push any quota past 50/75/90/99%? Save it for the
     // dashboard (org-pool notices go to every member) and return it inline.
@@ -764,6 +768,8 @@ async function main() {
       category,
       tokens,
       model: out.model || null,
+      costUsd: cost, // null when the model's price is unknown
+      cache: u && (u.cacheRead || u.cacheWrite) ? { read: u.cacheRead, write: u.cacheWrite } : undefined,
       truncated: !!out.truncated,
       notices: notices.map((n) => ({ level: n.level, text: n.text })),
       ms: Date.now() - started,
