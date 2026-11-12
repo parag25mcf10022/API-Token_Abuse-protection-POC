@@ -426,6 +426,19 @@ function setKeyLock(userId, lock) {
   return users.updateOne({ id: Number(userId) }, { $set: { keyLock: lock } });
 }
 
+/**
+ * Lock a key only if it isn't locked already (atomic). Returns true for the
+ * one caller that actually locked it, so concurrent triggers on several
+ * instances act and alert once.
+ */
+async function lockKeyIfUnlocked(userId, lock) {
+  const r = await users.updateOne(
+    { id: Number(userId), keyLock: null }, // null also matches a missing field
+    { $set: { keyLock: lock } }
+  );
+  return r.modifiedCount === 1;
+}
+
 /** Mark a locked key as approved for regeneration (org admin decision). */
 async function approveRegeneration(userId) {
   const r = await users.updateOne(
@@ -593,6 +606,7 @@ module.exports = {
   addOrgNotices,
   dismissNotices,
   setKeyLock,
+  lockKeyIfUnlocked,
   approveRegeneration,
   setProtection,
   countDevicesSince,

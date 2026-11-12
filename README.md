@@ -267,7 +267,7 @@ usage.js         Usage metering and limit checks
 protection.js    Automatic disable/rotate on compromise signals
 alerts.js        Security alerts
 security.js      CSP headers, input validation
-rateLimit.js     Per-IP rate limiter
+rateLimit.js     Shared rate limiter (MongoDB-backed, atomic)
 engine.js        Response engine: rules, FAQ, LLM, content classifier
 llm.js           LLM providers (Ollama, Claude): streaming, routing, prompts
 pricing.js       Per-model prices for cost tracking
@@ -284,8 +284,10 @@ org_client.py    Org management CLI
   keep costs down (no mail provider) and the test scope small while the core
   works. Accounts are created without verifying the address, and recovery
   goes through passwords and admins. It's planned for **M3** (see below).
-- The in-memory IP rate limiter is per process; shared limits are planned for
-  M2.
+- **Running several instances:** rate limits, lockouts and quotas live in
+  MongoDB (collections `ratelimits` and `usage`), so any number of app
+  instances pointed at the same database enforce the same limits. Put them
+  behind a load balancer with `TRUST_PROXY=1` so `req.ip` is the client's IP.
 
 ## Roadmap
 
@@ -297,14 +299,15 @@ flowchart LR
     M4 --> M5["🏢 M5<br/>SSO for orgs"]
     M5 --> M6["📦 M6<br/>Docker and CI"]
     style M1 fill:#16a34a,color:#fff,stroke:#15803d
-    style M2 fill:#4f46e5,color:#fff,stroke:#4338ca
+    style M2 fill:#16a34a,color:#fff,stroke:#15803d
+    style M3 fill:#4f46e5,color:#fff,stroke:#4338ca
 ```
 
 | Milestone | Goal | Key deliverables | Status |
 |-----------|------|------------------|--------|
 | **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ✅ hosted provider (Claude) with prompt caching · ✅ per-model cost tracking (Claude tested against a mock API; a live-key test is still to do) | ✅ Done |
-| **M2 — Shared rate limits** | Run more than one instance | Move the IP limiter and quota checks to a shared store (Redis or MongoDB); atomic quota enforcement | ⏭️ Next |
-| **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | 📋 Planned · near future |
+| **M2 — Shared rate limits** | Run more than one instance | ✅ IP limiter and lockouts in MongoDB · ✅ atomic quota enforcement (reserve → commit/release) · ✅ quota notices fire once across instances · ✅ auto-protection acts once across instances | ✅ Done |
+| **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | ⏭️ Next · near future |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |
 | **M5 — SSO** | Enterprise onboarding | OIDC/SAML login per org; automatic member provisioning | 📋 Planned |
 | **M6 — Packaging** | Easy deployment | Docker Compose (app + MongoDB); automated test suite in CI | 📋 Planned |

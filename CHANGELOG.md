@@ -2,6 +2,28 @@
 
 All notable changes to this project. Dates are in YYYY-MM-DD.
 
+## 2026-11-12
+
+### Added (M2: shared rate limits and atomic quotas)
+- **Shared rate limiter** (`rateLimit.js`): every per-IP limit and lockout
+  (login, signup, key viewing, session status, API, master key) now lives in
+  MongoDB (collection `ratelimits`, TTL-cleaned). Each hit is one atomic
+  update, so limits are exact across any number of app instances.
+- **Atomic quota enforcement** (`usage.js`): a request now *reserves* its
+  quota (request + estimated tokens) before it runs and is refused if that
+  breaks a limit, so concurrent requests can no longer overshoot a quota.
+  Afterwards the reservation is *committed* with the real token count, or
+  *released* if the request failed (failed requests no longer use quota).
+- Quota notices (50/75/90/99%) are computed from each request's own atomic
+  update, so each threshold fires exactly once, even across instances.
+- Automatic key protection claims the lock atomically, so concurrent triggers
+  lock/rotate a key and alert only once.
+
+### Changed
+- `usage.check()` / `usage.record()` / `usage.quotaNotices()` are replaced by
+  `usage.reserve()` / `usage.commit()` / `usage.release()`.
+- Rate-limiter methods are now async, and each limiter needs a unique `name`.
+
 ## 2026-10-31
 
 ### Added (M1: Claude provider and cost tracking)

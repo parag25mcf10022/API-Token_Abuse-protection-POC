@@ -8,9 +8,11 @@
  * mod: { <model>: { requests, tokens, cost, unpriced } }. A TTL index drops
  * old buckets automatically.
  *
- * check() runs before the request is processed and record() after, so under
- * heavy concurrency a subject can overshoot a limit by a few in-flight
- * requests. That's acceptable for quotas; the IP limiter still caps bursts.
+ * Enforcement is atomic: reserve() counts a request (with its estimated
+ * tokens) before it runs and refuses it if that breaks a limit; commit()
+ * swaps the estimate for the real token count afterwards, and release() gives
+ * the reservation back if the request fails. Several app instances can share
+ * one database without any of them overshooting a quota.
  */
 
 'use strict';
@@ -66,48 +68,105 @@ async function countersFor(subjectKey, now = new Date()) {
   return { minute: get(b.minute), day: get(b.day), month: get(b.month) };
 }
 
-/**
- * Would this request exceed any limit for the user or their org?
- * Returns { ok: true } or { ok: false, level, limit, max, retryAfterSec }.
- */
-async function check(user, org, category, estTokens) {
-  const now = new Date();
+const isDupKey = (e) => e && e.code === 11000;
+
+/** Every bucket document a request for this user (and org) counts against. */
+function targetsFor(user, org, now) {
+  const b = buckets(now);
+  const out = [];
   for (const s of subjects(user, org)) {
+    for (const [kind, x] of Object.entries(b)) {
+      out.push({ subject: s, kind, id: `${s.key}|${x.id}`, expiresAt: new Date(now.getTime() + x.ttl) });
+    }
+  }
+  return out;
+}
+
+/** Atomically $inc each target bucket; resolves the updated docs, in order. */
+function incAll(targets, inc) {
+  const one = (t) =>
+    usage.findOneAndUpdate(
+      { _id: t.id },
+      { $inc: inc, $setOnInsert: { expiresAt: t.expiresAt } },
+      { upsert: true, returnDocument: 'after' }
+    );
+  // A concurrent first upsert of the same bucket can lose the insert race;
+  // the retry then updates the document the winner created.
+  return Promise.all(targets.map((t) => one(t).catch((e) => (isDupKey(e) ? one(t) : Promise.reject(e)))));
+}
+
+/** Group per-target docs back into [{ subject, c: { minute, day, month } }]. */
+function bySubject(targets, docs) {
+  const map = new Map();
+  targets.forEach((t, i) => {
+    if (!map.has(t.subject.key)) map.set(t.subject.key, { subject: t.subject, c: {} });
+    map.get(t.subject.key).c[t.kind] = docs[i] || { requests: 0, tokens: 0, cat: {}, ctok: {} };
+  });
+  return [...map.values()];
+}
+
+/** First limit the (already counted) totals break, or null. */
+function violation(groups, category, now) {
+  for (const { subject: s, c } of groups) {
     const l = (s.policy && s.policy.limits) || {};
-    const c = await countersFor(s.key, now);
-    const rules = [
-      ['burstPerMinute', 'minute', c.minute.requests + 1],
-      ['requestsPerDay', 'day', c.day.requests + 1],
-      ['requestsPerMonth', 'month', c.month.requests + 1],
-      ['tokensPerDay', 'day', c.day.tokens + estTokens],
-      ['tokensPerMonth', 'month', c.month.tokens + estTokens],
-    ];
     // This category's own daily quota (requests and tokens) — independent of
     // every other category.
     const caps = categoryCaps(l, category);
-    const catReq = ((c.day.cat || {})[category] || 0) + 1;
-    const catTok = ((c.day.ctok || {})[category] || 0) + estTokens;
-    for (const [name, wouldBe, cap] of [
-      [`${category} requests/day`, catReq, caps.requests],
-      [`${category} tokens/day`, catTok, caps.tokens],
+    for (const [name, total, cap] of [
+      [`${category} requests/day`, (c.day.cat || {})[category] || 0, caps.requests],
+      [`${category} tokens/day`, (c.day.ctok || {})[category] || 0, caps.tokens],
     ]) {
-      if (Number.isInteger(cap) && wouldBe > cap) {
+      if (Number.isInteger(cap) && total > cap) {
         return { ok: false, level: s.level, limit: name, max: cap, retryAfterSec: secondsUntilReset('day', now) };
       }
     }
-    for (const [name, kind, wouldBe] of rules) {
-      if (Number.isInteger(l[name]) && wouldBe > l[name]) {
-        return {
-          ok: false,
-          level: s.level,
-          limit: name,
-          max: l[name],
-          retryAfterSec: secondsUntilReset(kind, now),
-        };
+    for (const [name, kind, total] of [
+      ['burstPerMinute', 'minute', c.minute.requests],
+      ['requestsPerDay', 'day', c.day.requests],
+      ['requestsPerMonth', 'month', c.month.requests],
+      ['tokensPerDay', 'day', c.day.tokens],
+      ['tokensPerMonth', 'month', c.month.tokens],
+    ]) {
+      if (Number.isInteger(l[name]) && total > l[name]) {
+        return { ok: false, level: s.level, limit: name, max: l[name], retryAfterSec: secondsUntilReset(kind, now) };
       }
     }
   }
-  return { ok: true };
+  return null;
+}
+
+/**
+ * Atomically claim quota for one request before it runs: the request (and
+ * its estimated tokens) is counted first, then the new totals are checked.
+ * If any limit is now exceeded the claim is undone and the request refused.
+ * Because every claim is a single atomic increment, concurrent requests —
+ * from one instance or many — can never jointly overshoot a limit. (Under a
+ * race at the very edge of a quota, both may be refused; never both allowed.)
+ *
+ * Resolves { ok: true, reservation } or { ok: false, level, limit, max,
+ * retryAfterSec }. A reservation MUST be passed to commit() or release().
+ */
+async function reserve(user, org, category, estTokens) {
+  const now = new Date();
+  const targets = targetsFor(user, org, now);
+  const inc = { requests: 1, tokens: estTokens, [`cat.${category}`]: 1, [`ctok.${category}`]: estTokens };
+  const docs = await incAll(targets, inc);
+  const bad = violation(bySubject(targets, docs), category, now);
+  if (bad) {
+    await incAll(targets, negate(inc));
+    return bad;
+  }
+  return { ok: true, reservation: { targets, category, estTokens, docs, done: false } };
+}
+
+const negate = (inc) => Object.fromEntries(Object.entries(inc).map(([k, v]) => [k, -v]));
+
+/** Give back a reservation whose request never completed. */
+async function release(r) {
+  if (!r || r.done) return;
+  r.done = true;
+  const c = r.category;
+  await incAll(r.targets, { requests: -1, tokens: -r.estTokens, [`cat.${c}`]: -1, [`ctok.${c}`]: -r.estTokens });
 }
 
 // Model names ("llama3.2:3b") become Mongo field names, which can't hold
@@ -117,14 +176,19 @@ const decodeModel = (k) => k.replace(/%2E/g, '.').replace(/%24/g, '$').replace(/
 const toMicro = (usd) => Math.round(usd * 1e6);
 
 /**
- * Count a completed request against the user (and org) buckets. When a
- * model answered, `spend` is { model, cost } with cost in USD (null when the
- * model's price is unknown).
+ * Settle a reservation once the request has run: swap the token estimate for
+ * the real count and add cost tracking. When a model answered, `spend` is
+ * { model, cost } with cost in USD (null when the model's price is unknown).
+ * The adjustment lands in the same buckets the reservation used, even if a
+ * minute/day has rolled over meanwhile. Resolves the quota notices this
+ * request triggered (see notices()).
  */
-async function record(user, org, category, tokens, spend = null) {
-  const now = new Date();
-  const b = buckets(now);
-  const inc = { requests: 1, tokens, [`cat.${category}`]: 1, [`ctok.${category}`]: tokens };
+async function commit(r, tokens, spend = null) {
+  if (r.done) throw new Error('reservation already settled');
+  r.done = true;
+  const { category } = r;
+  const diff = tokens - r.estTokens;
+  const inc = { tokens: diff, [`ctok.${category}`]: diff };
   if (spend && spend.model) {
     const m = `mod.${encodeModel(spend.model)}`;
     inc[`${m}.requests`] = 1;
@@ -138,22 +202,17 @@ async function record(user, org, category, tokens, spend = null) {
       inc[`${m}.cost`] = micro;
     }
   }
-  const ops = [];
-  for (const s of subjects(user, org)) {
-    for (const x of Object.values(b)) {
-      ops.push({
-        updateOne: {
-          filter: { _id: `${s.key}|${x.id}` },
-          update: {
-            $inc: inc,
-            $setOnInsert: { expiresAt: new Date(now.getTime() + x.ttl) },
-          },
-          upsert: true,
-        },
-      });
-    }
-  }
-  await usage.bulkWrite(ops, { ordered: false });
+  const after = await incAll(r.targets, inc);
+  // Request counts as of this request's own atomic claim; token totals as of
+  // its own atomic settlement. Each threshold crossing is then seen by
+  // exactly the request that caused it.
+  const merged = after.map((d, i) => ({
+    requests: r.docs[i].requests,
+    cat: r.docs[i].cat,
+    tokens: d.tokens,
+    ctok: d.ctok,
+  }));
+  return notices(bySubject(r.targets, merged), category, tokens, new Date());
 }
 
 // --- Quota notifications -----------------------------------------------------
@@ -167,17 +226,15 @@ const LABELS = {
 };
 
 /**
- * After a request is recorded: which 50/75/90/99% thresholds did THIS request
- * cross? Each crossing happens exactly once per period, so notices aren't
- * repeated. Returns [{ key, scope, level, text, percent }].
+ * Which 50/75/90/99% thresholds did THIS request cross? Each crossing happens
+ * exactly once per period, so notices aren't repeated.
+ * Returns [{ key, scope, level, text, percent }].
  */
-async function quotaNotices(user, org, category, tokens) {
-  const now = new Date();
+function notices(groups, category, tokens, now) {
   const periodId = { day: now.toISOString().slice(0, 10), month: now.toISOString().slice(0, 7) };
   const out = [];
-  for (const s of subjects(user, org)) {
+  for (const { subject: s, c } of groups) {
     const l = (s.policy && s.policy.limits) || {};
-    const c = await countersFor(s.key, now);
     const checks = [
       ['requestsPerDay', c.day.requests, 1],
       ['requestsPerMonth', c.month.requests, 1],
@@ -309,4 +366,4 @@ async function summary(subjectKey) {
   return { today: pick(c.day), month: pick(c.month) };
 }
 
-module.exports = { init, check, record, summary, quotaNotices, costGuide, THRESHOLDS };
+module.exports = { init, reserve, commit, release, summary, costGuide, THRESHOLDS };

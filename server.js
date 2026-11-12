@@ -24,7 +24,8 @@ const db = require('./db');
 const engine = require('./engine');
 const security = require('./security');
 const llm = require('./llm');
-const { createLimiter, limit, tooMany } = require('./rateLimit');
+const rateLimit = require('./rateLimit');
+const { createLimiter, limit, tooMany } = rateLimit;
 const usage = require('./usage');
 const alerts = require('./alerts');
 const policyLib = require('./policy');
@@ -42,6 +43,7 @@ async function main() {
   // Connect to MongoDB ("AAP") before wiring up anything that needs it.
   const mongo = await db.connect();
   await usage.init(mongo);
+  await rateLimit.init(mongo);
   await alerts.init(mongo);
   const protection = createProtection({ db, alerts });
 
@@ -183,20 +185,20 @@ async function main() {
   const MIN = 60 * 1000;
   const limits = {
     // Failed logins per (IP, email): blocks password guessing on one account.
-    loginFail: createLimiter({ windowMs: 15 * MIN, max: 5 }),
+    loginFail: createLimiter({ name: 'loginFail', windowMs: 15 * MIN, max: 5 }),
     // All login attempts per IP: blocks spraying many accounts.
-    loginIp: createLimiter({ windowMs: 15 * MIN, max: 30 }),
-    signupIp: createLimiter({ windowMs: 60 * MIN, max: 5 }),
+    loginIp: createLimiter({ name: 'loginIp', windowMs: 15 * MIN, max: 30 }),
+    signupIp: createLimiter({ name: 'signupIp', windowMs: 60 * MIN, max: 5 }),
     // CLI polls every 2 s (30/min); leave headroom.
-    statusIp: createLimiter({ windowMs: MIN, max: 60 }),
-    messageIp: createLimiter({ windowMs: MIN, max: 120 }),
+    statusIp: createLimiter({ name: 'statusIp', windowMs: MIN, max: 60 }),
+    messageIp: createLimiter({ name: 'messageIp', windowMs: MIN, max: 120 }),
     // Per-account limits are admin-configurable policies (see usage.js).
-    masterIp: createLimiter({ windowMs: MIN, max: 60 }),
+    masterIp: createLimiter({ name: 'masterIp', windowMs: MIN, max: 60 }),
     // Viewing a key: 3 wrong passwords per account → 15 min lockout; at most
     // 10 successful views per account per hour; 20 attempts per IP / 15 min.
-    revealFail: createLimiter({ windowMs: 15 * MIN, max: 3 }),
-    revealOk: createLimiter({ windowMs: 60 * MIN, max: 10 }),
-    revealIp: createLimiter({ windowMs: 15 * MIN, max: 20 }),
+    revealFail: createLimiter({ name: 'revealFail', windowMs: 15 * MIN, max: 3 }),
+    revealOk: createLimiter({ name: 'revealOk', windowMs: 60 * MIN, max: 10 }),
+    revealIp: createLimiter({ name: 'revealIp', windowMs: 15 * MIN, max: 20 }),
   };
   const byIp = (req) => req.ip;
 
@@ -294,7 +296,7 @@ async function main() {
     // Locked out after too many failures — checked BEFORE the password, so a
     // correct guess during the lockout is rejected too.
     const failKey = `${req.ip}|${cleanEmail.value}`;
-    const lock = limits.loginFail.blocked(failKey);
+    const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
 
     const user = await db.getUserByEmail(cleanEmail.value);
@@ -302,9 +304,9 @@ async function main() {
     // time doesn't reveal whether the account exists.
     const passwordOk = db.verifyPassword(password, user ? user.passwordHash : db.DUMMY_HASH);
     if (!user || !passwordOk) {
-      limits.loginFail.hit(failKey);
+      await limits.loginFail.hit(failKey);
       // Alert once, on the failure that triggers the lockout.
-      if (user && limits.loginFail.blocked(failKey).blocked) {
+      if (user && (await limits.loginFail.blocked(failKey)).blocked) {
         await alerts.raise('login_lockout', user, {
           detail: 'Too many failed login attempts; logins from this IP locked for 15 min.',
           ip: req.ip,
@@ -313,7 +315,7 @@ async function main() {
       }
       return res.status(401).json({ error: 'Invalid email or password.' });
     }
-    limits.loginFail.reset(failKey);
+    await limits.loginFail.reset(failKey);
     if (await db.noteLoginIp(user.id, req.ip)) {
       await alerts.raise('new_ip_login', user, { detail: 'Login from a new IP address.', ip: req.ip });
     }
@@ -351,7 +353,7 @@ async function main() {
   // alert admins.
   app.post('/auth/reveal-key', requireLogin, limit(limits.revealIp, byIp), wrap(async (req, res) => {
     const userId = req.session.userId;
-    const lock = limits.revealFail.blocked(userId);
+    const lock = await limits.revealFail.blocked(userId);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
 
     const user = await db.getUserById(userId);
@@ -359,8 +361,8 @@ async function main() {
     if (needsOwnPassword(user, res)) return;
     const { password } = req.body || {};
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
-      limits.revealFail.hit(userId);
-      const now = limits.revealFail.blocked(userId);
+      await limits.revealFail.hit(userId);
+      const now = await limits.revealFail.blocked(userId);
       if (now.blocked) {
         await alerts.raise('reveal_lockout', user, {
           detail: 'Too many wrong passwords while viewing the API key; session ended.',
@@ -377,7 +379,7 @@ async function main() {
       }
       return res.status(401).json({ error: 'Incorrect password.' });
     }
-    limits.revealFail.reset(userId);
+    await limits.revealFail.reset(userId);
 
     const apiKey = db.revealApiKey(user);
     if (!apiKey) {
@@ -388,7 +390,7 @@ async function main() {
       });
     }
     // Count only views that actually display a key.
-    const quota = limits.revealOk.hit(userId);
+    const quota = await limits.revealOk.hit(userId);
     if (!quota.allowed) return tooMany(res, quota.retryAfterSec);
     res.json({ apiKey });
   }));
@@ -402,17 +404,17 @@ async function main() {
     if (needsOwnPassword(user, res)) return;
     if (await db.getOrg(user.orgId)) return res.status(403).json({ error: 'Set by your organization admin.' });
     const failKey = `rotate|${user.id}`;
-    const lock = limits.loginFail.blocked(failKey);
+    const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
     const { action, password } = req.body || {};
     if (!PROTECTION_ACTIONS.includes(action)) {
       return res.status(400).json({ error: `action must be one of: ${PROTECTION_ACTIONS.join(', ')}.` });
     }
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
-      limits.loginFail.hit(failKey);
+      await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }
-    limits.loginFail.reset(failKey);
+    await limits.loginFail.reset(failKey);
     await db.setProtection(user.id, action);
     res.json({ action });
   }));
@@ -424,14 +426,14 @@ async function main() {
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     const failKey = `rotate|${user.id}`;
-    const lock = limits.loginFail.blocked(failKey);
+    const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
     const { currentPassword, newPassword } = req.body || {};
     if (!security.isPassword(currentPassword) || !db.verifyPassword(currentPassword, user.passwordHash)) {
-      limits.loginFail.hit(failKey);
+      await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Your current password is incorrect.' });
     }
-    limits.loginFail.reset(failKey);
+    await limits.loginFail.reset(failKey);
     const weak = security.passwordProblem(newPassword, user.email);
     if (weak) return res.status(400).json({ error: weak });
     if (newPassword === currentPassword) {
@@ -523,17 +525,17 @@ async function main() {
   app.post('/auth/rotate-key', requireLogin, wrap(async (req, res) => {
     const { password } = req.body || {};
     const failKey = `rotate|${req.session.userId}`;
-    const lock = limits.loginFail.blocked(failKey);
+    const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
 
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     if (needsOwnPassword(user, res)) return;
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
-      limits.loginFail.hit(failKey);
+      await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }
-    limits.loginFail.reset(failKey);
+    await limits.loginFail.reset(failKey);
     // Team/enterprise members whose key was locked as compromised need an
     // org admin to approve regeneration first. Personal accounts verify with
     // their password (above) and can regenerate straight away.
@@ -703,7 +705,9 @@ async function main() {
     // estimate includes conversation history, which is sent to the model.
     const historyText = hist.value.map((h) => h.content).join(' ');
     const est = policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(historyText);
-    const quota = await usage.check(user, org, category, est);
+    // Atomic: the request is counted before it runs, so concurrent requests
+    // (on any instance) can't jointly overshoot a quota.
+    const quota = await usage.reserve(user, org, category, est);
     if (!quota.ok) {
       const hits = await alerts.raise('limit_exceeded', user, {
         detail: `${quota.level} limit ${quota.limit} (${quota.max}) reached.`,
@@ -738,12 +742,18 @@ async function main() {
       res.set('X-Accel-Buffering', 'no');
       res.flushHeaders();
     }
-    const out = await engine.generate(msg.value, {
-      llm: useLlm ? llm : null,
-      category,
-      history: hist.value,
-      onDelta: streaming ? (text) => res.write(ndjson({ type: 'delta', text })) : undefined,
-    });
+    let out;
+    try {
+      out = await engine.generate(msg.value, {
+        llm: useLlm ? llm : null,
+        category,
+        history: hist.value,
+        onDelta: streaming ? (text) => res.write(ndjson({ type: 'delta', text })) : undefined,
+      });
+    } catch (e) {
+      await usage.release(quota.reservation); // a failed request doesn't use quota
+      throw e;
+    }
 
     // Meter real model token counts when a model ran (cached input included,
     // so caching saves money without changing quotas). Local answers never
@@ -753,11 +763,10 @@ async function main() {
       ? u.input + u.output + (u.cacheRead || 0) + (u.cacheWrite || 0)
       : policyLib.estimateTokens(msg.value) + policyLib.estimateTokens(out.reply);
     const cost = u ? (u.cost === undefined ? 0 : u.cost) : 0;
-    await usage.record(user, org, category, tokens, out.model ? { model: out.model, cost } : null);
-
-    // Did this request push any quota past 50/75/90/99%? Save it for the
-    // dashboard (org-pool notices go to every member) and return it inline.
-    const notices = await usage.quotaNotices(user, org, category, tokens);
+    // Settle the reservation with the real token count. Returns any quota
+    // thresholds (50/75/90/99%) this request crossed: saved for the dashboard
+    // (org-pool notices go to every member) and returned inline.
+    const notices = await usage.commit(quota.reservation, tokens, out.model ? { model: out.model, cost } : null);
     if (notices.length) {
       await db.addNotices(user.id, notices.filter((n) => n.scope === 'user'));
       if (org) await db.addOrgNotices(org.id, notices.filter((n) => n.scope === 'org'));
@@ -875,14 +884,14 @@ async function main() {
     }
     if (needsOwnPassword(user, res)) return;
     const failKey = `rotate|${user.id}`;
-    const lock = limits.loginFail.blocked(failKey);
+    const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
     const { password } = req.body || {};
     if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
-      limits.loginFail.hit(failKey);
+      await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }
-    limits.loginFail.reset(failKey);
+    await limits.loginFail.reset(failKey);
     res.json({ masterKey: await db.rotateOrgMasterKey(user.orgId) });
   }));
 

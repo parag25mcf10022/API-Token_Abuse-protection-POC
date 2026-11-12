@@ -54,8 +54,10 @@ function createProtection({ db, alerts }) {
     if (action === 'alert' || user.keyLock) return 'alert';
 
     const lock = { reason: signal, action, at: new Date(), regenApproved: false };
+    // Claim the lock atomically: if another request/instance got there
+    // first, it has already acted and alerted.
+    if (!(await db.lockKeyIfUnlocked(user.id, lock))) return 'alert';
     if (action === 'rotate') await db.revokeApiKey(user.id); // old key dies for good
-    await db.setKeyLock(user.id, lock);
 
     const recovery = (await db.getOrg(user.orgId))
       ? 'An org admin must approve regeneration.'
