@@ -344,6 +344,7 @@ def waiting_text(reason, base):
         ),
         "no_session": f"log in to the web app at {base}",
         "key_disabled": "an admin must enable your key",
+        "email_unverified": f"verify your email — click the link we sent (or resend it at {base})",
         "key_locked_needs_approval": "key locked — waiting for your org admin to approve regeneration",
     }.get(reason, f"waiting for the server ({base})")
 

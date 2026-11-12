@@ -37,7 +37,7 @@ const REASONS = {
   limit_abuse: 'Excessive limit-blocked requests',
 };
 
-function createProtection({ db, alerts }) {
+function createProtection({ db, alerts, mailer = null }) {
   /** Action in force for this user: the org's for members, their own otherwise. */
   async function effectiveAction(user) {
     const org = await db.getOrg(user.orgId);
@@ -66,6 +66,8 @@ function createProtection({ db, alerts }) {
       detail: `${REASONS[signal]} — key automatically ${action === 'rotate' ? 'rotated (old key revoked)' : 'disabled'}. ${recovery}`,
       ip,
     });
+    // Tell the owner by email too (verified addresses only; in the background).
+    if (mailer) mailer.notify(user, 'keyLocked', { reason: REASONS[signal], action, recovery, ip });
     return action;
   }
 

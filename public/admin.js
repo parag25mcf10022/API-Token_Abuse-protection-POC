@@ -30,6 +30,7 @@ const ALERT_TONES = {
   reveal_lockout: 'off',
   unapproved_device_use: 'warn',
   auto_protect: 'off',
+  password_reset: 'info',
 };
 
 const PROTECTION_OPTIONS = [
@@ -55,6 +56,7 @@ const ALERT_LABELS = {
   reveal_lockout: 'Key-view lockout',
   unapproved_device_use: 'Unapproved device use',
   auto_protect: 'Key auto-locked',
+  password_reset: 'Password reset by email',
 };
 
 async function api(path, opts = {}) {
@@ -204,6 +206,7 @@ function renderUsers() {
   for (const u of state.users) {
     const who = el('span', {}, String(u.email));
     if (u.isAdmin) who.append(' ', badge(true, 'super admin'));
+    if (!u.emailVerified) who.append(' ', badge(false, 'email unverified'));
     const org = u.orgId ? `${orgName(u.orgId)} · ${u.orgRole}` : '—';
     const key = el('span', {},
       u.keyLock ? badge(false, u.keyLock.action === 'rotate' ? 'auto-rotated' : 'auto-locked')
@@ -220,6 +223,13 @@ function renderUsers() {
           act(post(`/api/admin/users/${u.id}/revoke-key`));
         }
       }));
+    if (!u.emailVerified) {
+      actions.append(' ', button('Mark email verified', () => {
+        if (confirm(`Mark ${u.email} as verified? Only do this if you know the address belongs to them.`)) {
+          act(post(`/api/admin/users/${u.id}/verify-email`));
+        }
+      }));
+    }
     if (u.keyLock) {
       if (!u.keyLock.regenApproved) {
         actions.append(' ', button('Approve regeneration', () =>

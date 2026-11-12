@@ -399,3 +399,8 @@ td .ghost.small { margin: 2px 0; }
 .toast.critical { border-left-color: var(--bad); }
 .dim-row td { opacity: 0.6; }
 .used-cell { display: grid; grid-template-columns: 36px 1fr; gap: 8px; align-items: center; min-width: 120px; }
+
+/* Pages opened from emailed links (verify / reset). */
+.email-action { margin: 48px auto; justify-self: center; display: grid; gap: 12px; }
+.email-action form { display: grid; gap: 12px; }
+#forgot-form { display: grid; gap: 10px; margin-top: 8px; }

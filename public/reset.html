@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="referrer" content="no-referrer" />
+  <title>Choose a new password — AAP</title>
+  <link rel="icon" href="data:," />
+  <link rel="stylesheet" href="/styles.css" />
+</head>
+<body data-page="reset">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <div class="brand">
+        <span class="brand-mark">🔐</span>
+        <div>
+          <strong>AAP</strong>
+          <span class="brand-sub">Account-Bound API Key Protection</span>
+        </div>
+      </div>
+    </div>
+  </header>
+  <main class="wrap">
+    <section class="card auth-card email-action">
+      <h2>Choose a new password</h2>
+      <form id="reset-form">
+        <label>New password
+          <input type="password" id="pw-new" autocomplete="new-password" maxlength="256" required />
+        </label>
+        <label>Repeat new password
+          <input type="password" id="pw-confirm" autocomplete="new-password" maxlength="256" required />
+        </label>
+        <button type="submit" class="primary">Set new password</button>
+      </form>
+      <p class="muted small">Every session is logged out afterwards, so your API key stops working until you log in again.</p>
+      <p id="msg" class="small"></p>
+      <p id="error" class="error"></p>
+      <p class="hint"><a href="/">Back to the app</a></p>
+    </section>
+  </main>
+  <script src="/email-action.js"></script>
+</body>
+</html>

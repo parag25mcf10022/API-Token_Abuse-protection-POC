@@ -55,7 +55,16 @@
           <button type="submit" id="auth-submit" class="primary">Log in</button>
           <p id="auth-error" class="error"></p>
         </form>
-        <p class="hint">New accounts need an admin to enable their API key before it works.</p>
+        <p class="hint"><a href="#forgot" id="forgot-link">Forgot your password?</a></p>
+        <form id="forgot-form" class="hidden">
+          <label>Email for the reset link
+            <input type="email" id="forgot-email" autocomplete="username" maxlength="254" required />
+          </label>
+          <button type="submit" class="ghost">Email me a reset link</button>
+          <p id="forgot-msg" class="small"></p>
+          <p id="forgot-error" class="error"></p>
+        </form>
+        <p class="hint">New accounts verify their email, and an admin enables their API key before it works.</p>
       </div>
     </section>
 
@@ -87,6 +96,13 @@
         </div>
         <ul id="notice-list" class="notice-list"></ul>
       </section>
+
+      <div id="verify-banner" class="callout danger hidden">
+        <strong>Verify your email address.</strong>
+        We sent a link to <span id="verify-email"></span>. Your API key won't work until you click it.
+        <button id="verify-resend" class="ghost small">Resend email</button>
+        <span id="verify-msg" class="small"></span>
+      </div>
 
       <div id="pw-banner" class="callout danger hidden">
         <strong>Set your own password.</strong>

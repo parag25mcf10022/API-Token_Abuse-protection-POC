@@ -11,6 +11,7 @@
  *   reveal_lockout  — too many wrong passwords while viewing the key
  *   unapproved_device_use — key used from a device the owner never approved
  *   auto_protect    — key automatically disabled/rotated (see protection.js)
+ *   password_reset  — password reset through an emailed link
  *
  * Noisy types are de-duplicated per user per day via `dedupeKey`.
  */

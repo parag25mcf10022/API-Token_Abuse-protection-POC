@@ -16,6 +16,15 @@
 
 const crypto = require('crypto');
 const path = require('path');
+
+// Local configuration from .env (git-ignored), if present. Variables already
+// set in the environment win.
+try {
+  process.loadEnvFile(path.join(__dirname, '.env'));
+} catch (e) {
+  if (e.code !== 'ENOENT') throw e;
+}
+
 const express = require('express');
 const session = require('express-session');
 const MongoStore = require('connect-mongo').default;
@@ -28,6 +37,7 @@ const rateLimit = require('./rateLimit');
 const { createLimiter, limit, tooMany } = rateLimit;
 const usage = require('./usage');
 const alerts = require('./alerts');
+const mailer = require('./mailer');
 const policyLib = require('./policy');
 const { createAdminRouter } = require('./adminRoutes');
 const { createProtection, ACTIONS: PROTECTION_ACTIONS } = require('./protection');
@@ -45,7 +55,7 @@ async function main() {
   await usage.init(mongo);
   await rateLimit.init(mongo);
   await alerts.init(mongo);
-  const protection = createProtection({ db, alerts });
+  const protection = createProtection({ db, alerts, mailer });
 
   const app = express();
   app.disable('x-powered-by');
@@ -177,7 +187,11 @@ async function main() {
     if (!req.session || !req.session.userId) {
       return res.status(401).json({ error: 'Not logged in' });
     }
-    next();
+    // Per-account cap on every logged-in route (limits defined below).
+    limits.anyUser.hit(req.session.userId).then(
+      (r) => (r.allowed ? next() : tooMany(res, r.retryAfterSec)),
+      next
+    );
   }
 
 
@@ -199,7 +213,26 @@ async function main() {
     revealFail: createLimiter({ name: 'revealFail', windowMs: 15 * MIN, max: 3 }),
     revealOk: createLimiter({ name: 'revealOk', windowMs: 60 * MIN, max: 10 }),
     revealIp: createLimiter({ name: 'revealIp', windowMs: 15 * MIN, max: 20 }),
+    // Backstops on every /auth and /api route: per IP, and per logged-in
+    // account (so one account can't hammer the server from many IPs).
+    anyIp: createLimiter({ name: 'anyIp', windowMs: MIN, max: 300 }),
+    anyUser: createLimiter({ name: 'anyUser', windowMs: MIN, max: 120 }),
+    adminIp: createLimiter({ name: 'adminIp', windowMs: MIN, max: 120 }),
+    // Email verification: sending (signup + resend) per IP and per account;
+    // redeeming links per IP, with a tighter cap on failed attempts.
+    verifySendIp: createLimiter({ name: 'verifySendIp', windowMs: 60 * MIN, max: 10 }),
+    verifySendUser: createLimiter({ name: 'verifySendUser', windowMs: 60 * MIN, max: 3 }),
+    verifyIp: createLimiter({ name: 'verifyIp', windowMs: 15 * MIN, max: 20 }),
+    verifyFailIp: createLimiter({ name: 'verifyFailIp', windowMs: 15 * MIN, max: 5 }),
+    // Password reset: requesting the email per IP and per address; redeeming
+    // per IP, with a tighter cap on failed attempts.
+    forgotIp: createLimiter({ name: 'forgotIp', windowMs: 60 * MIN, max: 5 }),
+    forgotEmail: createLimiter({ name: 'forgotEmail', windowMs: 60 * MIN, max: 3 }),
+    resetIp: createLimiter({ name: 'resetIp', windowMs: 15 * MIN, max: 10 }),
+    resetFailIp: createLimiter({ name: 'resetFailIp', windowMs: 15 * MIN, max: 5 }),
   };
+  const VERIFY_TTL_MS = 24 * 60 * MIN;
+  const RESET_TTL_MS = 30 * MIN;
   const byIp = (req) => req.ip;
 
   // API keys travel ONLY in the X-API-Key header: never in the URL (it ends up
@@ -261,6 +294,22 @@ async function main() {
     res.set('Cache-Control', 'no-store');
     next();
   });
+  app.use(['/auth', '/api'], limit(limits.anyIp, byIp));
+
+  /**
+   * Email a fresh verification link to the user. Counts against the
+   * per-account send limit. Resolves { sent, error?, retryAfterSec? }.
+   */
+  async function sendVerification(user, { ip = null, org = null } = {}) {
+    const q = await limits.verifySendUser.hit(user.id);
+    if (!q.allowed) return { sent: false, error: 'rate_limited', retryAfterSec: q.retryAfterSec };
+    const token = await db.issueEmailToken(user.id, 'verify', VERIFY_TTL_MS);
+    const url = `${mailer.appUrl()}/verify.html#token=${token}`;
+    const data = { email: user.email, url, hours: VERIFY_TTL_MS / 3600000, ip, org };
+    const m = org ? mailer.templates.memberVerify(data) : mailer.templates.verifyEmail(data);
+    const r = await mailer.send({ to: user.email, ...m });
+    return r.ok ? { sent: true } : { sent: false, error: 'send_failed' };
+  }
 
   // =======================================================================
   // AUTH / WEB APP
@@ -283,8 +332,11 @@ async function main() {
       return res.status(409).json({ error: e.message });
     }
     await startSession(req, user.id);
+    // Signups count against the per-IP verification-send limit too.
+    const ipq = await limits.verifySendIp.hit(req.ip);
+    const verification = ipq.allowed ? await sendVerification(user, { ip: req.ip }) : { sent: false, error: 'rate_limited' };
     // The plaintext key is returned exactly once, here. Only its hash is stored.
-    res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin });
+    res.json({ email: user.email, apiKey: user.apiKey, isAdmin: user.isAdmin, verificationSent: verification.sent });
   }));
 
   app.post('/auth/login', limit(limits.loginIp, byIp), wrap(async (req, res) => {
@@ -419,6 +471,90 @@ async function main() {
     res.json({ action });
   }));
 
+  // --- Email verification ---------------------------------------------------
+  // Resend the verification link (logged in). Limited per IP and per account.
+  app.post('/auth/resend-verification', limit(limits.verifySendIp, byIp), requireLogin, wrap(async (req, res) => {
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (user.emailVerified) return res.json({ ok: true, alreadyVerified: true });
+    const org = await db.getOrg(user.orgId);
+    const r = await sendVerification(user, { ip: req.ip, org: org && org.name });
+    if (r.error === 'rate_limited') {
+      res.set('Retry-After', String(r.retryAfterSec));
+      return res.status(429).json({ error: 'Too many verification emails. Try again later.', retryAfter: r.retryAfterSec });
+    }
+    if (!r.sent) return res.status(502).json({ error: "We couldn't send the email right now. Try again later or ask your admin." });
+    res.json({ ok: true, sentTo: user.email });
+  }));
+
+  // Redeem a verification link. The token arrives in the POST body (the page
+  // reads it from the URL fragment), so it never appears in server logs and
+  // link scanners that pre-fetch URLs can't use it up.
+  app.post('/auth/verify-email', limit(limits.verifyIp, byIp), wrap(async (req, res) => {
+    const lock = await limits.verifyFailIp.blocked(req.ip);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const userId = await db.consumeEmailToken((req.body || {}).token, 'verify');
+    if (!userId) {
+      await limits.verifyFailIp.hit(req.ip);
+      return res.status(400).json({ error: 'This verification link is invalid, already used, or expired. Request a new one from your dashboard.' });
+    }
+    await db.setEmailVerified(userId);
+    res.json({ ok: true });
+  }));
+
+  // --- Password reset by email ------------------------------------------------
+  // Always the same answer, and the email is sent in the background, so the
+  // response never reveals whether an account exists. Limited per IP; each
+  // address gets at most a few emails per hour (excess requests are silently
+  // dropped, so the limit can't be used to probe addresses either).
+  const FORGOT_REPLY = { ok: true, message: 'If an account exists for that email, a reset link is on its way. It expires in 30 minutes.' };
+
+  app.post('/auth/forgot-password', limit(limits.forgotIp, byIp), wrap(async (req, res) => {
+    const e = security.cleanEmail((req.body || {}).email);
+    if (!e.ok) return res.status(400).json({ error: e.error });
+    res.json(FORGOT_REPLY);
+    (async () => {
+      const q = await limits.forgotEmail.hit(e.value);
+      if (!q.allowed) return;
+      const user = await db.getUserByEmail(e.value);
+      if (!user) return;
+      const token = await db.issueEmailToken(user.id, 'reset', RESET_TTL_MS);
+      const url = `${mailer.appUrl()}/reset.html#token=${token}`;
+      await mailer.send({ to: user.email, ...mailer.templates.resetPassword({ email: user.email, url, minutes: RESET_TTL_MS / 60000, ip: req.ip }) });
+    })().catch((err) => console.error('[forgot-password]', err.message));
+  }));
+
+  // Set a new password with a reset link. The password is checked BEFORE the
+  // token is used up, so a weak choice doesn't burn the link.
+  app.post('/auth/reset-password', limit(limits.resetIp, byIp), wrap(async (req, res) => {
+    const lock = await limits.resetFailIp.blocked(req.ip);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const { token, newPassword } = req.body || {};
+    if (typeof newPassword !== 'string' || !security.isPassword(newPassword)) {
+      return res.status(400).json({ error: 'newPassword is required.' });
+    }
+    const bad = () => res.status(400).json({ error: 'This reset link is invalid, already used, or expired. Request a new one.' });
+    // Look the token up WITHOUT using it, so a too-weak password doesn't burn
+    // the link; then redeem it atomically (single use, even under a race).
+    const owner = await db.peekEmailToken(token, 'reset');
+    if (!owner) { await limits.resetFailIp.hit(req.ip); return bad(); }
+    const user = await db.getUserById(owner);
+    if (!user) return bad();
+    const weak = security.passwordProblem(newPassword, user.email);
+    if (weak) return res.status(400).json({ error: weak });
+    if ((await db.consumeEmailToken(token, 'reset')) !== user.id) return bad();
+    await db.setPassword(user.id, newPassword, { ownChoice: true });
+    await db.setEmailVerified(user.id); // they proved they read this inbox
+    await db.deleteEmailTokens(user.id, 'reset');
+    await limits.loginFail.reset(`${req.ip}|${user.email}`); // can log in right away
+    // End every session: whoever knew the old password is logged out, and the
+    // key stops working until the owner logs in with the new one.
+    const { deletedCount } = await sessionsCol.deleteMany({ 'session.userId': user.id });
+    await alerts.raise('password_reset', user, { detail: `Password reset by email link; ${deletedCount} session(s) ended.`, ip: req.ip });
+    mailer.notify({ ...user, emailVerified: true }, 'passwordChanged', { how: 'reset with an emailed link', ip: req.ip, sessionsEnded: deletedCount });
+    res.json({ ok: true });
+  }));
+
   // Change your own password: requires your CURRENT password (wrong attempts
   // share the lockout used by other sensitive actions). Ends every other
   // session for the account, so a stolen session can't outlive the change.
@@ -444,6 +580,7 @@ async function main() {
       'session.userId': user.id,
       _id: { $ne: req.sessionID },
     });
+    mailer.notify(user, 'passwordChanged', { how: 'changed from your dashboard', ip: req.ip, sessionsEnded: deletedCount });
     res.json({ ok: true, otherSessionsEnded: deletedCount });
   }));
 
@@ -488,6 +625,7 @@ async function main() {
       apiKeyPrefix: user.apiKeyPrefix, // full key only via /auth/reveal-key
       keyRevealable: !!user.apiKeyEnc && !user.keyRevoked,
       mustChangePassword: !!user.mustChangePassword,
+      emailVerified: user.emailVerified !== false,
       keyLock: user.keyLock
         ? { reason: user.keyLock.reason, action: user.keyLock.action, at: user.keyLock.at, regenApproved: !!user.keyLock.regenApproved }
         : null,
@@ -580,6 +718,7 @@ async function main() {
       const org = await db.getOrg(user.orgId);
       reason = org && !user.keyLock.regenApproved ? 'key_locked_needs_approval' : 'key_locked';
     } else if (!user.keyEnabled) reason = 'key_disabled';
+    else if (user.emailVerified === false) reason = 'email_unverified';
     else if (!(await userHasActiveSession(user.id))) reason = 'no_session';
     res.json(reason ? { active: false, reason } : { active: true });
   }));
@@ -610,6 +749,11 @@ async function main() {
     // 2. Has an admin disabled this key?
     if (!user.keyEnabled) {
       res.status(403).json({ error: 'Forbidden: API key is disabled' });
+      return null;
+    }
+    // 2b. Has the owner verified their email address?
+    if (user.emailVerified === false) {
+      res.status(403).json({ error: 'Forbidden: verify your email address first (check your inbox, or resend from the dashboard).' });
       return null;
     }
     // 3. Locked automatically after suspected compromise/abuse?
@@ -831,7 +975,7 @@ async function main() {
   // =======================================================================
 
   const admin = createAdminRouter({
-    db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide,
+    db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide, mailer, sendVerification,
   });
 
   // Session-authenticated admins: super admin, or an org admin (own org only).
@@ -871,7 +1015,7 @@ async function main() {
     res.status(403).json({ error: "Forbidden: master key may only be used from an org admin's approved device." });
   });
 
-  app.use('/api/admin', sessionActor, admin.router);
+  app.use('/api/admin', limit(limits.adminIp, byIp), sessionActor, admin.router);
   app.use('/api/org', limit(limits.masterIp, byIp), masterActor, admin.router);
 
   // Org admins issue/rotate their org's master key from the web UI (password
@@ -923,12 +1067,12 @@ async function main() {
     await seedAccount(
       process.env.ADMIN_EMAIL || 'admin@example.com',
       process.env.ADMIN_PASSWORD,
-      { isAdmin: true, keyEnabled: true }
+      { isAdmin: true, keyEnabled: true, emailVerified: true }
     ),
     await seedAccount(
       process.env.DEMO_USER_EMAIL || 'user@example.com',
       process.env.DEMO_USER_PASSWORD,
-      { keyEnabled: true }
+      { keyEnabled: true, emailVerified: true }
     ),
   ];
 

@@ -2,7 +2,41 @@
 
 All notable changes to this project. Dates are in YYYY-MM-DD.
 
-## 2026-11-12
+## 2026-11-12 (M3)
+
+### Added (M3: email verification and recovery)
+- **Email via Resend** (`mailer.js`, plain `fetch`, no new dependency).
+  Configured with `RESEND_API_KEY`, `EMAIL_FROM` and `APP_URL`, from the
+  environment or a git-ignored `.env` (see `.env.example`). Without a key,
+  emails are printed to the server console.
+- **Purpose-specific email templates**, each with its own colour and label,
+  a details box (account, time, IP, expiry), a call to action and next steps,
+  in HTML and plain text: verify email, org-member welcome, password reset,
+  password changed, key auto-locked, key revoked.
+- **Email verification**: new signups and admin-created members get a
+  one-time link (24 h). Until it's used, the API key is refused and the CLI
+  shows `email_unverified`. The dashboard shows a banner with **Resend**.
+  Admins can **Mark email verified**. Existing accounts count as verified.
+- **Password reset by email**: "Forgot your password?" on the login card
+  sends a 30-minute single-use link (same reply whether or not the account
+  exists). Resetting ends every session, clears the login lockout, marks the
+  email verified, raises a `password_reset` alert and sends a confirmation.
+- **Security emails** to the owner (verified addresses only) when their key
+  is auto-locked or revoked, or their password is changed or reset.
+- Link tokens are 256-bit, stored only as SHA-256 hashes with a TTL, and
+  carried in the URL fragment, which the page POSTs, so they never reach
+  server logs and link scanners can't use them up. Issuing a new link voids
+  the previous one.
+- **Strict rate limits on every endpoint** (all shared across instances):
+  - every `/auth` and `/api` route: 300/min per IP; logged-in routes also
+    120/min per account; admin API 120/min per IP
+  - verification emails: 10/h per IP and 3/h per account
+  - verify links: 20 per 15 min per IP, locked after 5 bad links
+  - forgot password: 5/h per IP, at most 3 emails/h per address (extra
+    requests are silently dropped, so the limit can't reveal accounts)
+  - reset: 10 per 15 min per IP, locked after 5 bad links
+
+## 2026-11-12 (M2)
 
 ### Added (M2: shared rate limits and atomic quotas)
 - **Shared rate limiter** (`rateLimit.js`): every per-IP limit and lockout

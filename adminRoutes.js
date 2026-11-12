@@ -22,7 +22,7 @@ const { ACTIONS: PROTECTION_ACTIONS, DEFAULT_ACTION } = require('./protection');
 const isId = (v) => /^\d{1,9}$/.test(String(v));
 const PUBLIC_ID_RE = /^[0-9a-f]{16}$/;
 
-function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide }) {
+function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, countActiveSessions, costGuide, mailer, sendVerification }) {
   const router = express.Router();
 
   // --- helpers ---------------------------------------------------------------
@@ -53,6 +53,7 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
     return {
       id: u.id,
       email: u.email,
+      emailVerified: u.emailVerified !== false,
       isAdmin: !!u.isAdmin,
       orgId: u.orgId || null,
       orgRole: u.orgRole || null,
@@ -120,6 +121,13 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
     res.json({ userId: req.target.id, keyEnabled: await db.setKeyEnabled(req.target.id, enabled) });
   }));
 
+  // Confirm a user's email address by hand (e.g. mail can't reach them yet).
+  router.post('/users/:id/verify-email', withTarget, wrap(async (req, res) => {
+    await db.setEmailVerified(req.target.id);
+    await db.deleteEmailTokens(req.target.id, 'verify');
+    res.json({ userId: req.target.id, emailVerified: true });
+  }));
+
   router.post('/users/:id/policy', withTarget, wrap(async (req, res) => {
     const v = policyLib.validatePolicy((req.body || {}).policy);
     if (!v.ok) return res.status(400).json({ error: v.error });
@@ -136,6 +144,7 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
     await alerts.raise('key_revoked', req.target, {
       detail: `Key revoked by ${req.actor.kind === 'super' ? 'super admin' : 'org admin'}; ${deletedCount} session(s) ended.`,
     });
+    mailer.notify(req.target, 'keyRevoked', { by: req.actor.kind === 'super' ? 'an administrator' : 'your organization admin', sessionsEnded: deletedCount });
     res.json({ ok: true, sessionsEnded: deletedCount });
   }));
 
@@ -223,7 +232,9 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       return res.status(409).json({ error: err.message });
     }
     await db.revokeApiKey(user.id); // no usable key until the member generates one
-    res.json({ id: user.id, email: user.email, orgId: org.id, mustChangePassword: true });
+    // The member confirms the address the admin entered (limited per account).
+    const v = await sendVerification(user, { org: org.name });
+    res.json({ id: user.id, email: user.email, orgId: org.id, mustChangePassword: true, verificationSent: v.sent });
   }));
 
   // --- super admin only --------------------------------------------------------

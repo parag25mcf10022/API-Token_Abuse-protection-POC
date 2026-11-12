@@ -76,6 +76,9 @@ function showDashboard(user) {
     $(id).placeholder = `Your password (${user.email})`;
   }
   $('pw-banner').classList.toggle('hidden', !user.mustChangePassword);
+  $('verify-banner').classList.toggle('hidden', !!user.emailVerified);
+  $('verify-email').textContent = user.email;
+
   if (user.mustChangePassword) $('password-card').scrollIntoView({ block: 'center' });
   // Masked by default; the full key needs the password (Show key).
   maskedKey = user.apiKeyPrefix ? `${user.apiKeyPrefix}${'•'.repeat(12)}` : '— no active key —';
@@ -111,6 +114,7 @@ function showDashboard(user) {
     $('lock-text').textContent = `Reason: ${REASON_LABELS[lk.reason] || lk.reason}. ${how} ${next}`;
   }
   if (lk) setPill('status-key', 'Locked', 'bad');
+  else if (!user.emailVerified) setPill('status-key', 'Verify email', 'warnpill');
 
   // Compromise protection: personal accounts choose; org members see it.
   const prot = user.protection || {};
@@ -440,7 +444,40 @@ $('auth-form').onsubmit = async (e) => {
     return;
   }
   $('password').value = '';
-  loadDashboard(data.apiKey); // present only on signup
+  await loadDashboard(data.apiKey); // present only on signup
+  if (mode === 'signup') {
+    $('verify-msg').textContent = data.verificationSent
+      ? 'Verification email sent.'
+      : "We couldn't send the verification email yet — use Resend.";
+  }
+};
+
+// --- Forgot password -----------------------------------------------------------
+function showForgot() {
+  $('forgot-form').classList.remove('hidden');
+  $('forgot-email').value = $('email').value;
+  $('forgot-email').focus();
+}
+$('forgot-link').onclick = (e) => { e.preventDefault(); showForgot(); };
+
+$('forgot-form').onsubmit = async (e) => {
+  e.preventDefault();
+  $('forgot-msg').textContent = '';
+  $('forgot-error').textContent = '';
+  const { ok, data } = await api('/auth/forgot-password', {
+    method: 'POST',
+    body: JSON.stringify({ email: $('forgot-email').value }),
+  });
+  if (!ok) { $('forgot-error').textContent = data.error || 'Could not send the email.'; return; }
+  $('forgot-msg').textContent = data.message;
+};
+
+$('verify-resend').onclick = async () => {
+  $('verify-msg').textContent = '';
+  const { ok, data } = await api('/auth/resend-verification', { method: 'POST', body: '{}' });
+  if (!ok) { $('verify-msg').textContent = data.error || 'Could not send the email.'; return; }
+  if (data.alreadyVerified) { loadDashboard(); return; }
+  $('verify-msg').textContent = `Sent to ${data.sentTo}. Check your inbox (and spam folder).`;
 };
 
 $('rotate-form').onsubmit = async (e) => {
@@ -566,4 +603,7 @@ $('master-form').onsubmit = async (e) => {
 };
 
 // --- On load: are we already logged in? ---
-loadDashboard();
+loadDashboard().then(() => {
+  // Arriving from a "reset password" link in an email.
+  if (location.hash === '#forgot' && !$('auth-view').classList.contains('hidden')) showForgot();
+});

@@ -24,6 +24,7 @@ let users;
 let counters;
 let devices;
 let orgs;
+let emailTokens;
 
 /** Connect once and cache the handles. Safe to call repeatedly. */
 async function connect() {
@@ -35,6 +36,7 @@ async function connect() {
   counters = db.collection('counters');
   devices = db.collection('devices');
   orgs = db.collection('orgs');
+  emailTokens = db.collection('emailtokens');
   await users.createIndex({ email: 1 }, { unique: true });
   await users.createIndex({ id: 1 }, { unique: true });
   await migratePlaintextKeys();
@@ -49,6 +51,12 @@ async function connect() {
   );
   await users.createIndex({ orgId: 1 });
   await migrateMissingPolicies();
+  // One-time-link tokens (email verification, password reset): stored only as
+  // SHA-256 hashes; expired ones are removed by TTL.
+  await emailTokens.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+  await emailTokens.createIndex({ userId: 1, purpose: 1 });
+  // Accounts created before email verification existed are treated as verified.
+  await users.updateMany({ emailVerified: { $exists: false } }, { $set: { emailVerified: true } });
   return db;
 }
 
@@ -199,6 +207,7 @@ async function createUser(
     orgRole = null,
     policy = null,
     mustChangePassword = false, // set when someone else chose the password
+    emailVerified = false, // proven by clicking the emailed link
   } = {}
 ) {
   email = email.trim().toLowerCase();
@@ -222,6 +231,7 @@ async function createUser(
     orgRole, // 'admin' | 'member' | null
     policy: policy || DEFAULT_USER_POLICY,
     mustChangePassword: !!mustChangePassword,
+    emailVerified: !!emailVerified,
     knownIps: [],
     createdAt: new Date().toISOString(),
   };
@@ -294,6 +304,64 @@ async function setPassword(userId, password, { ownChoice = false } = {}) {
   const $set = { passwordHash: hashPassword(password) };
   if (ownChoice) $set.mustChangePassword = false;
   await users.updateOne({ id: Number(userId) }, { $set });
+}
+
+// --- One-time email links (verification, password reset) -------------------
+// The token itself goes only into the email; the DB keeps its SHA-256 hash, so
+// a database leak can't be used to verify or reset anything.
+const TOKEN_PURPOSES = ['verify', 'reset'];
+const hashToken = (t) => crypto.createHash('sha256').update(String(t)).digest('hex');
+
+/**
+ * Issue a new single-use token for a user and purpose. Any earlier token for
+ * the same purpose is invalidated, so only the latest link works.
+ */
+async function issueEmailToken(userId, purpose, ttlMs) {
+  if (!TOKEN_PURPOSES.includes(purpose)) throw new Error('bad token purpose');
+  const token = crypto.randomBytes(32).toString('base64url');
+  await emailTokens.deleteMany({ userId: Number(userId), purpose });
+  await emailTokens.insertOne({
+    _id: hashToken(token),
+    userId: Number(userId),
+    purpose,
+    createdAt: new Date(),
+    expiresAt: new Date(Date.now() + ttlMs),
+  });
+  return token;
+}
+
+/**
+ * Redeem a token: atomically deletes it (single use, even across instances)
+ * and returns the userId, or null if it's unknown, used, expired or for
+ * another purpose.
+ */
+async function consumeEmailToken(token, purpose) {
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const doc = await emailTokens.findOneAndDelete({
+    _id: hashToken(token),
+    purpose,
+    expiresAt: { $gt: new Date() },
+  });
+  return doc ? doc.userId : null;
+}
+
+/** The token's owner if it's currently valid, without using it up. */
+async function peekEmailToken(token, purpose) {
+  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const doc = await emailTokens.findOne({ _id: hashToken(token), purpose, expiresAt: { $gt: new Date() } });
+  return doc ? doc.userId : null;
+}
+
+function deleteEmailTokens(userId, purpose) {
+  return emailTokens.deleteMany({ userId: Number(userId), ...(purpose ? { purpose } : {}) });
+}
+
+async function setEmailVerified(userId) {
+  const r = await users.updateOne(
+    { id: Number(userId) },
+    { $set: { emailVerified: true, emailVerifiedAt: new Date() } }
+  );
+  return r.matchedCount === 1;
 }
 
 // --- Devices ---------------------------------------------------------------
@@ -588,6 +656,11 @@ module.exports = {
   listUsers,
   setKeyEnabled,
   setPassword,
+  issueEmailToken,
+  consumeEmailToken,
+  peekEmailToken,
+  deleteEmailTokens,
+  setEmailVerified,
   getDevice,
   deviceApprovedElsewhere,
   registerPendingDevice,

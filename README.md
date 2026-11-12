@@ -195,8 +195,10 @@ CLI extras: `/usage` (quotas per category), `/model`, `/device`, `/clear`,
 | **Compromise auto-response** | Repeated use from unapproved devices, a key spreading to 5+ new unapproved devices in 24 h, wrong passwords while viewing the key, or 50+ limit-blocked calls in a day **automatically disable or rotate** the key. Org admins choose the action for their org; personal users choose for themselves. **Team/enterprise members need admin approval to regenerate**; personal users regenerate with their password. Admins can unlock false alarms. |
 | **Quotas & notifications** | The dashboard lists every category with its own daily request and token quota, usage, remaining allowance, typical cost per request, and **why** a category is unavailable (not in your plan, blocked by your org, quota 0, used up). You're notified at **50%, 75%, 90% and 99%** of any quota, on the dashboard (with a pop-up while it's open) and inline in the CLI. Org-pool warnings reach every member. |
 | **Context-aware classification** | Natural questions ("what's 2+3?", "summarize this", "center a div") land in the right category. Short follow-ups ("explain it more simply") keep the conversation's category; unrelated questions don't, even with a forged history. Blocked messages say which category they were put in and which ones you're allowed. |
-| **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, and a revoked key. Admins can revoke a key from an alert; the owner then generates the new one. |
+| **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, a revoked key, and a password reset by email. Admins can revoke a key from an alert; the owner then generates the new one. |
 | **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Claude models can be the default or serve chosen categories, with prompt caching, automatic refusal fallbacks and per-model cost tracking. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
+| **Email (M3)** | **Verification at signup**: the API key works only after the owner clicks a one-time link (admin-created members get a welcome version naming their org). **Password reset by email** with a 30-minute single-use link; resetting ends every session. **Security emails** to the owner when their key is auto-locked or revoked, or their password changes — each type has its own template (purpose, details such as time and IP, next steps). Links carry the token in the URL fragment and are stored only as hashes. Security emails go only to verified addresses. Admins can mark an address verified by hand. |
+| **Strict rate limits** | Every `/auth` and `/api` route: 300/min per IP, and 120/min per logged-in account. Verification emails: 10/h per IP, 3/h per account. Verify links: 20 per 15 min per IP, locked after 5 bad links. Forgot password: 5/h per IP, 3 emails/h per address (excess silently dropped, so it can't probe for accounts). Reset: 10 per 15 min per IP, locked after 5 bad links. Plus login, key-view and API limits. All shared across instances. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
 
 ## Org management (master key)
@@ -225,10 +227,14 @@ rejected.
 | POST | `/auth/rotate-key` | session + password | New API key; old one dies (locked org members need approval) |
 | POST | `/auth/protection` | session + password | Personal accounts: action on compromise |
 | POST | `/auth/change-password` | session + current password | Set a new password; ends other sessions |
+| POST | `/auth/resend-verification` | session | Email a new verification link |
+| POST | `/auth/verify-email` | one-time token | Confirm the email address (`{token}` from the link) |
+| POST | `/auth/forgot-password` | — | Email a reset link (same reply whether or not the account exists) |
+| POST | `/auth/reset-password` | one-time token | `{token, newPassword}`; ends every session |
 | POST | `/auth/notices/dismiss` | session | Mark one (`id`) or all quota notifications read |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
-| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active, reason}`. Reasons: `invalid_key`, `device_not_approved`, `device_approved_for_other_account`; the owner's approved devices also get `no_session`, `key_disabled`, `key_locked` |
+| GET | `/auth/session-status` | `X-API-Key`, `X-AAP-Device` | `{active, reason}`. Reasons: `invalid_key`, `device_not_approved`, `device_approved_for_other_account`; the owner's approved devices also get `no_session`, `key_disabled`, `email_unverified`, `key_locked` |
 | POST | `/api/message` | `X-API-Key`, `X-AAP-Device` | Protected endpoint; `stream: true` for NDJSON, optional `history` |
 | GET | `/api/usage` · `/api/engine` | `X-API-Key`, `X-AAP-Device` | Your limits/usage · engine status |
 | * | `/api/admin/*` | admin session | Admin API |
@@ -236,8 +242,14 @@ rejected.
 
 ## Configuration
 
+Settings come from environment variables, or from a `.env` file in the project
+folder (git-ignored; see `.env.example`). Real environment variables win.
+
 | Variable | Default | Purpose |
 |----------|---------|---------|
+| `RESEND_API_KEY` | unset | Sends email through [Resend](https://resend.com) (a send-only key is enough). Unset: emails are printed to the server console instead |
+| `EMAIL_FROM` | `"AAP" <onboarding@resend.dev>` | Sender. Resend's shared `onboarding@resend.dev` only delivers to your own Resend account's address; verify a domain in Resend to email anyone |
+| `APP_URL` | `http://localhost:$PORT` | Public URL used in email links |
 | `PORT` | `3000` | HTTP port |
 | `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `AAP` | Database |
 | `SESSION_SECRET` | generated, stored in DB | Cookie signing |
@@ -266,6 +278,7 @@ policy.js        Categories, scope + limit validation
 usage.js         Usage metering and limit checks
 protection.js    Automatic disable/rotate on compromise signals
 alerts.js        Security alerts
+mailer.js        Email via Resend + one template per email type
 security.js      CSP headers, input validation
 rateLimit.js     Shared rate limiter (MongoDB-backed, atomic)
 engine.js        Response engine: rules, FAQ, LLM, content classifier
@@ -280,10 +293,10 @@ org_client.py    Org management CLI
 
 ## Scope notes
 
-- **Email verification is not implemented yet.** It was left out on purpose to
-  keep costs down (no mail provider) and the test scope small while the core
-  works. Accounts are created without verifying the address, and recovery
-  goes through passwords and admins. It's planned for **M3** (see below).
+- **Email verification:** accounts created before it existed are treated as
+  verified. New signups and admin-created members must verify before their key
+  works. With Resend's test sender, mail only reaches your own Resend address;
+  until you verify a domain, admins can use **Mark email verified**.
 - **Running several instances:** rate limits, lockouts and quotas live in
   MongoDB (collections `ratelimits` and `usage`), so any number of app
   instances pointed at the same database enforce the same limits. Put them
@@ -294,21 +307,22 @@ org_client.py    Org management CLI
 ```mermaid
 flowchart LR
     M1["🤖 M1<br/>LLM integration"] --> M2["📈 M2<br/>Shared rate limits<br/>and scaling"]
-    M2 --> M3["✉️ M3<br/>Email verification<br/>(near future)"]
+    M2 --> M3["✉️ M3<br/>Email verification<br/>and recovery"]
     M3 --> M4["🔔 M4<br/>Alert webhooks<br/>and audit log"]
     M4 --> M5["🏢 M5<br/>SSO for orgs"]
     M5 --> M6["📦 M6<br/>Docker and CI"]
     style M1 fill:#16a34a,color:#fff,stroke:#15803d
     style M2 fill:#16a34a,color:#fff,stroke:#15803d
-    style M3 fill:#4f46e5,color:#fff,stroke:#4338ca
+    style M3 fill:#16a34a,color:#fff,stroke:#15803d
+    style M4 fill:#4f46e5,color:#fff,stroke:#4338ca
 ```
 
 | Milestone | Goal | Key deliverables | Status |
 |-----------|------|------------------|--------|
 | **M1 — LLM integration** | Answer what the local engine can't | ✅ Local Ollama behind all checks · ✅ streaming + multi-turn · ✅ per-category routing and system prompts · ✅ real token metering · ✅ admin LLM on/off per user or org · ✅ hosted provider (Claude) with prompt caching · ✅ per-model cost tracking (Claude tested against a mock API; a live-key test is still to do) | ✅ Done |
 | **M2 — Shared rate limits** | Run more than one instance | ✅ IP limiter and lockouts in MongoDB · ✅ atomic quota enforcement (reserve → commit/release) · ✅ quota notices fire once across instances · ✅ auto-protection acts once across instances | ✅ Done |
-| **M3 — Email verification and recovery** | Production-ready accounts | Email verification at signup (skipped for now to cut costs and test scope); password reset by email; emails to the owner when a key is auto-locked or revoked | ⏭️ Next · near future |
-| **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | 📋 Planned |
+| **M3 — Email verification and recovery** | Production-ready accounts | ✅ Email verification at signup (Resend) · ✅ password reset by email · ✅ emails to the owner when a key is auto-locked or revoked, or the password changes · ✅ purpose-specific email templates · ✅ strict per-IP and per-account limits on every email flow | ✅ Done |
+| **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | ⏭️ Next |
 | **M5 — SSO** | Enterprise onboarding | OIDC/SAML login per org; automatic member provisioning | 📋 Planned |
 | **M6 — Packaging** | Easy deployment | Docker Compose (app + MongoDB); automated test suite in CI | 📋 Planned |
 
