@@ -31,6 +31,8 @@ const ALERT_TONES = {
   unapproved_device_use: 'warn',
   auto_protect: 'off',
   password_reset: 'info',
+  oauth_linked: 'info',
+  oauth_unlinked: 'info',
 };
 
 const PROTECTION_OPTIONS = [
@@ -57,6 +59,8 @@ const ALERT_LABELS = {
   unapproved_device_use: 'Unapproved device use',
   auto_protect: 'Key auto-locked',
   password_reset: 'Password reset by email',
+  oauth_linked: 'Sign-in provider connected',
+  oauth_unlinked: 'Sign-in provider disconnected',
 };
 
 async function api(path, opts = {}) {
@@ -207,6 +211,7 @@ function renderUsers() {
     const who = el('span', {}, String(u.email));
     if (u.isAdmin) who.append(' ', badge(true, 'super admin'));
     if (!u.emailVerified) who.append(' ', badge(false, 'email unverified'));
+    if (u.signIn && u.signIn.length) who.append(el('br'), el('span', { class: 'muted small' }, `sign-in: ${u.signIn.join(', ')}`));
     const org = u.orgId ? `${orgName(u.orgId)} · ${u.orgRole}` : '—';
     const key = el('span', {},
       u.keyLock ? badge(false, u.keyLock.action === 'rotate' ? 'auto-rotated' : 'auto-locked')

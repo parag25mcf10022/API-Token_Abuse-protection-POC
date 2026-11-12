@@ -404,3 +404,23 @@ td .ghost.small { margin: 2px 0; }
 .email-action { margin: 48px auto; justify-self: center; display: grid; gap: 12px; }
 .email-action form { display: grid; gap: 12px; }
 #forgot-form { display: grid; gap: 10px; margin-top: 8px; }
+
+/* Sign in with a provider. */
+.oauth-buttons { margin-top: 14px; display: grid; gap: 10px; }
+.oauth-divider { display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 0.8rem; }
+.oauth-divider::before, .oauth-divider::after { content: ''; flex: 1; border-top: 1px solid var(--line); }
+.oauth-list { display: grid; gap: 8px; }
+.oauth-btn {
+  display: block; text-align: center; padding: 10px 14px; border-radius: 8px;
+  border: 1px solid var(--line); color: var(--ink); text-decoration: none; font-weight: 600;
+}
+.oauth-btn:hover { border-color: var(--accent); }
+.oauth-btn::before { margin-right: 8px; font-weight: 800; }
+.oauth-google::before { content: 'G'; color: #ea4335; }
+.oauth-github::before { content: '◆'; }
+.oauth-microsoft::before { content: '▦'; color: #00a4ef; }
+.btn-link { display: inline-block; margin: 6px 6px 0 0; text-decoration: none; }
+.methods-list { list-style: none; margin: 0 0 12px; padding: 0; display: grid; gap: 8px; }
+.methods-list li { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.methods-list li strong { min-width: 90px; }
+.methods-list li button { margin-left: auto; }

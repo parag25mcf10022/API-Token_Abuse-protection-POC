@@ -38,6 +38,7 @@ const { createLimiter, limit, tooMany } = rateLimit;
 const usage = require('./usage');
 const alerts = require('./alerts');
 const mailer = require('./mailer');
+const oauth = require('./oauth');
 const policyLib = require('./policy');
 const { createAdminRouter } = require('./adminRoutes');
 const { createProtection, ACTIONS: PROTECTION_ACTIONS } = require('./protection');
@@ -171,6 +172,29 @@ async function main() {
     return true;
   }
 
+  // Accounts without a password (created by signing in with a provider)
+  // confirm sensitive actions with a FRESH provider sign-in instead, valid
+  // for 5 minutes in this session only. Password accounts are unchanged.
+  const REAUTH_MS = 5 * 60 * 1000;
+  const freshlyConfirmed = (req) =>
+    Number.isFinite(req.session.reauthAt) && Date.now() - req.session.reauthAt < REAUTH_MS;
+
+  /** 'ok' | 'bad' (wrong password) | 'reauth' (provider sign-in needed). */
+  function confirmIdentity(req, user, password) {
+    if (user.hasPassword === false) return freshlyConfirmed(req) ? 'ok' : 'reauth';
+    return security.isPassword(password) && db.verifyPassword(password, user.passwordHash) ? 'ok' : 'bad';
+  }
+
+  function needsReauth(res, user) {
+    const providers = (user.identities || []).map((i) => i.provider);
+    const names = providers.map((p) => oauth.PROVIDERS[p].name).join(' or ') || 'your provider';
+    return res.status(401).json({
+      error: `Confirm it's you: sign in again with ${names}. The confirmation lasts 5 minutes.`,
+      reauthRequired: true,
+      providers,
+    });
+  }
+
   // Start a fresh session ID on authentication (prevents session fixation).
   function startSession(req, userId) {
     return new Promise((resolve, reject) => {
@@ -230,6 +254,11 @@ async function main() {
     forgotEmail: createLimiter({ name: 'forgotEmail', windowMs: 60 * MIN, max: 3 }),
     resetIp: createLimiter({ name: 'resetIp', windowMs: 15 * MIN, max: 10 }),
     resetFailIp: createLimiter({ name: 'resetFailIp', windowMs: 15 * MIN, max: 5 }),
+    // Provider sign-in: starting and finishing per IP; connecting or
+    // disconnecting a provider per account.
+    oauthStartIp: createLimiter({ name: 'oauthStartIp', windowMs: 15 * MIN, max: 20 }),
+    oauthCallbackIp: createLimiter({ name: 'oauthCallbackIp', windowMs: 15 * MIN, max: 20 }),
+    oauthLinkUser: createLimiter({ name: 'oauthLinkUser', windowMs: 60 * MIN, max: 10 }),
   };
   const VERIFY_TTL_MS = 24 * 60 * MIN;
   const RESET_TTL_MS = 30 * MIN;
@@ -412,7 +441,9 @@ async function main() {
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     if (needsOwnPassword(user, res)) return;
     const { password } = req.body || {};
-    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+    const check = confirmIdentity(req, user, password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
       await limits.revealFail.hit(userId);
       const now = await limits.revealFail.blocked(userId);
       if (now.blocked) {
@@ -462,13 +493,201 @@ async function main() {
     if (!PROTECTION_ACTIONS.includes(action)) {
       return res.status(400).json({ error: `action must be one of: ${PROTECTION_ACTIONS.join(', ')}.` });
     }
-    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+    const check = confirmIdentity(req, user, password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
       await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }
     await limits.loginFail.reset(failKey);
     await db.setProtection(user.id, action);
     res.json({ action });
+  }));
+
+  // --- Sign in with Google / GitHub / Microsoft -----------------------------
+  // Flow: /auth/oauth/<p>/start (or POST .../link) → provider → .../callback.
+  // The state, PKCE verifier and nonce live in the server-side session, are
+  // single use, and expire after 10 minutes. Outcomes come back to the app as
+  // /?oauth=<ok-code> or /?oauth_error=<error-code> (never any secret).
+  const OAUTH_MAX_AGE_MS = 10 * 60 * 1000;
+  const redirectUri = (provider) => `${mailer.appUrl()}/auth/oauth/${provider}/callback`;
+  const back = (res, key, code) => res.redirect(303, `/?${key}=${encodeURIComponent(code)}`);
+
+  app.get('/auth/oauth/providers', (req, res) => res.json({ providers: oauth.enabledProviders() }));
+
+  // Start a sign-in (intent=login) or a confirmation for key actions
+  // (intent=reauth, logged in, with a provider already linked to the account).
+  app.get('/auth/oauth/:provider/start', limit(limits.oauthStartIp, byIp), wrap(async (req, res) => {
+    const { provider } = req.params;
+    if (!oauth.configured(provider)) return back(res, 'oauth_error', 'not_configured');
+    const intent = req.query.intent === 'reauth' ? 'reauth' : 'login';
+    let loginHint;
+    if (intent === 'reauth') {
+      const user = req.session.userId && (await db.getUserById(req.session.userId));
+      if (!user) return back(res, 'oauth_error', 'login_first');
+      const link = (user.identities || []).find((i) => i.provider === provider);
+      if (!link) return back(res, 'oauth_error', 'not_linked');
+      loginHint = link.email || undefined;
+    }
+    const b = oauth.begin(provider, intent, redirectUri(provider), { loginHint });
+    req.session.oauth = { ...b.state, userId: req.session.userId || null };
+    req.session.save((err) => (err ? res.status(500).end() : res.redirect(303, b.url)));
+  }));
+
+  // Connect a provider to the logged-in account. Needs the password (or a
+  // fresh provider confirmation for password-less accounts): otherwise a
+  // stolen session could add the attacker's own account as a way back in.
+  app.post('/auth/oauth/:provider/link', requireLogin, wrap(async (req, res) => {
+    const { provider } = req.params;
+    if (!oauth.configured(provider)) return res.status(404).json({ error: 'That sign-in provider is not enabled.' });
+    const q = await limits.oauthLinkUser.hit(req.session.userId);
+    if (!q.allowed) return tooMany(res, q.retryAfterSec);
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    if (needsOwnPassword(user, res)) return;
+    const failKey = `rotate|${user.id}`;
+    const lock = await limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const check = confirmIdentity(req, user, (req.body || {}).password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
+      await limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    await limits.loginFail.reset(failKey);
+    if ((user.identities || []).some((i) => i.provider === provider)) {
+      return res.status(409).json({ error: `${oauth.PROVIDERS[provider].name} is already connected.` });
+    }
+    const b = oauth.begin(provider, 'link', redirectUri(provider));
+    req.session.oauth = { ...b.state, userId: user.id };
+    req.session.save((err) => (err ? res.status(500).json({ error: 'Session error' }) : res.json({ url: b.url })));
+  }));
+
+  // Disconnect a provider (same confirmation). The last way to sign in can't
+  // be removed.
+  app.post('/auth/oauth/:provider/unlink', requireLogin, wrap(async (req, res) => {
+    const { provider } = req.params;
+    if (!oauth.isProvider(provider)) return res.status(404).json({ error: 'Unknown provider.' });
+    const q = await limits.oauthLinkUser.hit(req.session.userId);
+    if (!q.allowed) return tooMany(res, q.retryAfterSec);
+    const user = await db.getUserById(req.session.userId);
+    if (!user) return res.status(401).json({ error: 'Not logged in' });
+    const failKey = `rotate|${user.id}`;
+    const lock = await limits.loginFail.blocked(failKey);
+    if (lock.blocked) return tooMany(res, lock.retryAfterSec);
+    const check = confirmIdentity(req, user, (req.body || {}).password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
+      await limits.loginFail.hit(failKey);
+      return res.status(401).json({ error: 'Incorrect password.' });
+    }
+    await limits.loginFail.reset(failKey);
+    const r = await db.unlinkIdentity(user.id, provider);
+    if (r === 'not_linked') return res.status(404).json({ error: 'That provider is not connected.' });
+    if (r === 'last_method') {
+      return res.status(400).json({ error: 'This is your only way to sign in. Set a password or connect another provider first.' });
+    }
+    await alerts.raise('oauth_unlinked', user, { detail: `${oauth.PROVIDERS[provider].name} sign-in disconnected.`, ip: req.ip });
+    res.json({ ok: true });
+  }));
+
+  app.get('/auth/oauth/:provider/callback', limit(limits.oauthCallbackIp, byIp), wrap(async (req, res) => {
+    const { provider } = req.params;
+    const saved = req.session.oauth;
+    delete req.session.oauth; // single use, whatever happens next
+    if (!oauth.configured(provider)) return back(res, 'oauth_error', 'not_configured');
+    const { code, state, error } = req.query;
+    if (
+      !saved || saved.provider !== provider || typeof state !== 'string' ||
+      state.length !== saved.state.length ||
+      !crypto.timingSafeEqual(Buffer.from(state), Buffer.from(saved.state)) ||
+      Date.now() - saved.startedAt > OAUTH_MAX_AGE_MS
+    ) {
+      return back(res, 'oauth_error', 'state');
+    }
+    if (error) return back(res, 'oauth_error', 'denied');
+    if (typeof code !== 'string' || !code || code.length > 2048) return back(res, 'oauth_error', 'state');
+
+    let profile;
+    try {
+      profile = await oauth.complete(provider, code, saved, redirectUri(provider));
+    } catch (e) {
+      console.warn(`[oauth] ${provider} sign-in failed: ${e.message}`);
+      return back(res, 'oauth_error', 'provider');
+    }
+    const name = oauth.PROVIDERS[provider].name;
+
+    // --- Confirm it's you (for key actions on password-less accounts) -------
+    if (saved.intent === 'reauth') {
+      const user = await db.getUserByIdentity(provider, profile.sub);
+      if (!user || user.id !== saved.userId || req.session.userId !== saved.userId) {
+        return back(res, 'oauth_error', 'reauth_mismatch');
+      }
+      // OpenID providers report when the person actually signed in; it must
+      // be after this confirmation started (1 min clock skew).
+      if (profile.authTime && profile.authTime < saved.startedAt - 60000) return back(res, 'oauth_error', 'reauth_stale');
+      req.session.reauthAt = Date.now();
+      return req.session.save(() => back(res, 'oauth', 'confirmed'));
+    }
+
+    // --- Connect to the logged-in account -------------------------------------
+    if (saved.intent === 'link') {
+      if (!saved.userId || req.session.userId !== saved.userId) return back(res, 'oauth_error', 'login_first');
+      const user = await db.getUserById(saved.userId);
+      if (!user) return back(res, 'oauth_error', 'login_first');
+      const r = await db.linkIdentity(user.id, profile);
+      if (r === 'taken') return back(res, 'oauth_error', 'already_linked');
+      if (r === 'provider_in_use') return back(res, 'oauth_error', 'provider_in_use');
+      if (r === 'linked') {
+        await alerts.raise('oauth_linked', user, { detail: `${name} sign-in connected (${profile.email || 'no email'}).`, ip: req.ip });
+        mailer.notify(user, 'identityLinked', { provider: name, providerEmail: profile.email, ip: req.ip });
+      }
+      return back(res, 'oauth', 'linked');
+    }
+
+    // --- Sign in, or sign up ------------------------------------------------------
+    let user = await db.getUserByIdentity(provider, profile.sub);
+    if (!user) {
+      if (!profile.email) return back(res, 'oauth_error', 'no_email');
+      const e = security.cleanEmail(profile.email);
+      if (!e.ok) return back(res, 'oauth_error', 'no_email');
+      const existing = await db.getUserByEmail(e.value);
+      if (existing) {
+        // Link automatically only when BOTH sides have proven the address.
+        const trusted = oauth.PROVIDERS[provider].trustsEmail && profile.emailVerified && existing.emailVerified !== false;
+        if (!trusted) return back(res, 'oauth_error', 'link_required');
+        const r = await db.linkIdentity(existing.id, profile);
+        if (r !== 'linked' && r !== 'already_linked') return back(res, 'oauth_error', 'link_required');
+        await alerts.raise('oauth_linked', existing, { detail: `${name} sign-in connected automatically (verified email).`, ip: req.ip });
+        mailer.notify(existing, 'identityLinked', { provider: name, providerEmail: profile.email, ip: req.ip, automatic: true });
+        user = existing;
+      } else {
+        // New account. Same per-IP signup limit as password signups.
+        const q = await limits.signupIp.hit(req.ip);
+        if (!q.allowed) return back(res, 'oauth_error', 'signup_limited');
+        const verified = oauth.PROVIDERS[provider].trustsEmail && profile.emailVerified;
+        try {
+          user = await db.createUser(e.value, crypto.randomBytes(32).toString('base64url'), {
+            hasPassword: false, // the random password above is never revealed or usable
+            emailVerified: verified,
+            identities: [db.identityDoc(profile)],
+          });
+        } catch (err) {
+          // Lost a race with a concurrent sign-up for the same account.
+          user = await db.getUserByIdentity(provider, profile.sub);
+          if (!user) return back(res, 'oauth_error', 'provider');
+        }
+        if (!verified) {
+          const ipq = await limits.verifySendIp.hit(req.ip);
+          if (ipq.allowed) await sendVerification(user, { ip: req.ip });
+        }
+      }
+    }
+    if (await db.noteLoginIp(user.id, req.ip)) {
+      await alerts.raise('new_ip_login', user, { detail: `Login from a new IP address (via ${name}).`, ip: req.ip });
+    }
+    await startSession(req, user.id);
+    back(res, 'oauth', 'signed_in');
   }));
 
   // --- Email verification ---------------------------------------------------
@@ -565,14 +784,18 @@ async function main() {
     const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
     const { currentPassword, newPassword } = req.body || {};
-    if (!security.isPassword(currentPassword) || !db.verifyPassword(currentPassword, user.passwordHash)) {
+    // Accounts created with a provider have no password yet: they set one
+    // after a fresh provider sign-in instead of entering a current password.
+    const check = confirmIdentity(req, user, currentPassword);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
       await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Your current password is incorrect.' });
     }
     await limits.loginFail.reset(failKey);
     const weak = security.passwordProblem(newPassword, user.email);
     if (weak) return res.status(400).json({ error: weak });
-    if (newPassword === currentPassword) {
+    if (user.hasPassword !== false && newPassword === currentPassword) {
       return res.status(400).json({ error: 'Choose a password different from the current one.' });
     }
     await db.setPassword(user.id, newPassword, { ownChoice: true });
@@ -580,7 +803,8 @@ async function main() {
       'session.userId': user.id,
       _id: { $ne: req.sessionID },
     });
-    mailer.notify(user, 'passwordChanged', { how: 'changed from your dashboard', ip: req.ip, sessionsEnded: deletedCount });
+    const how = user.hasPassword === false ? 'set for the first time from your dashboard' : 'changed from your dashboard';
+    mailer.notify(user, 'passwordChanged', { how, ip: req.ip, sessionsEnded: deletedCount });
     res.json({ ok: true, otherSessionsEnded: deletedCount });
   }));
 
@@ -626,6 +850,10 @@ async function main() {
       keyRevealable: !!user.apiKeyEnc && !user.keyRevoked,
       mustChangePassword: !!user.mustChangePassword,
       emailVerified: user.emailVerified !== false,
+      hasPassword: user.hasPassword !== false,
+      identities: (user.identities || []).map((i) => ({ provider: i.provider, email: i.email, linkedAt: i.linkedAt })),
+      oauthProviders: oauth.enabledProviders(),
+      confirmedUntil: freshlyConfirmed(req) ? req.session.reauthAt + REAUTH_MS : null,
       keyLock: user.keyLock
         ? { reason: user.keyLock.reason, action: user.keyLock.action, at: user.keyLock.at, regenApproved: !!user.keyLock.regenApproved }
         : null,
@@ -669,7 +897,9 @@ async function main() {
     const user = await db.getUserById(req.session.userId);
     if (!user) return res.status(401).json({ error: 'Not logged in' });
     if (needsOwnPassword(user, res)) return;
-    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+    const check = confirmIdentity(req, user, password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
       await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }
@@ -1031,7 +1261,9 @@ async function main() {
     const lock = await limits.loginFail.blocked(failKey);
     if (lock.blocked) return tooMany(res, lock.retryAfterSec);
     const { password } = req.body || {};
-    if (!security.isPassword(password) || !db.verifyPassword(password, user.passwordHash)) {
+    const check = confirmIdentity(req, user, password);
+    if (check === 'reauth') return needsReauth(res, user);
+    if (check === 'bad') {
       await limits.loginFail.hit(failKey);
       return res.status(401).json({ error: 'Incorrect password.' });
     }

@@ -55,6 +55,11 @@
           <button type="submit" id="auth-submit" class="primary">Log in</button>
           <p id="auth-error" class="error"></p>
         </form>
+        <div id="oauth-buttons" class="oauth-buttons hidden">
+          <div class="oauth-divider"><span>or continue with</span></div>
+          <div id="oauth-list" class="oauth-list"></div>
+          <p class="muted small">New here? Continuing with a provider creates your account.</p>
+        </div>
         <p class="hint"><a href="#forgot" id="forgot-link">Forgot your password?</a></p>
         <form id="forgot-form" class="hidden">
           <label>Email for the reset link
@@ -102,6 +107,13 @@
         We sent a link to <span id="verify-email"></span>. Your API key won't work until you click it.
         <button id="verify-resend" class="ghost small">Resend email</button>
         <span id="verify-msg" class="small"></span>
+      </div>
+
+      <div id="reauth-banner" class="callout hidden">
+        <strong>Your account has no password.</strong>
+        Viewing or rotating your key and other protected actions need a fresh sign-in with your provider.
+        <span id="reauth-state" class="small"></span>
+        <span id="reauth-buttons"></span>
       </div>
 
       <div id="pw-banner" class="callout danger hidden">
@@ -200,6 +212,20 @@
           <div id="plan-scopes" class="chips"></div>
           <div id="usage-meters" class="meters"></div>
           <p id="plan-limits" class="muted small"></p>
+        </section>
+
+        <!-- SIGN-IN METHODS -->
+        <section id="methods-card" class="card span-2">
+          <div class="card-head">
+            <h2>Sign-in methods</h2>
+            <span class="muted small">Ways to log in to this account</span>
+          </div>
+          <ul id="methods-list" class="methods-list"></ul>
+          <div id="methods-confirm" class="row">
+            <input type="password" id="methods-password" placeholder="Your password (to connect or disconnect)"
+                   autocomplete="current-password" maxlength="256" />
+          </div>
+          <p id="methods-error" class="error"></p>
         </section>
 
         <!-- PASSWORD -->

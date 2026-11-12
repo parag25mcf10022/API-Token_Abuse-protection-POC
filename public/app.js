@@ -18,7 +18,56 @@ function showAuth() {
   $('auth-view').classList.remove('hidden');
   $('dash-view').classList.add('hidden');
   $('topbar-user').classList.add('hidden');
+  loadProviders();
 }
+
+// --- Sign in with Google / GitHub / Microsoft -------------------------------------
+const PROVIDER_NAMES = { google: 'Google', github: 'GitHub', microsoft: 'Microsoft' };
+let enabledProviders = null;
+
+async function loadProviders() {
+  if (!enabledProviders) {
+    const { ok, data } = await api('/auth/oauth/providers');
+    enabledProviders = ok ? data.providers : [];
+  }
+  const list = $('oauth-list');
+  list.replaceChildren();
+  for (const p of enabledProviders) {
+    const a = document.createElement('a');
+    a.className = `oauth-btn oauth-${p.id}`;
+    a.href = `/auth/oauth/${encodeURIComponent(p.id)}/start`;
+    a.textContent = p.name;
+    list.append(a);
+  }
+  $('oauth-buttons').classList.toggle('hidden', enabledProviders.length === 0);
+}
+
+const OAUTH_OK = {
+  linked: 'Connected. You can now sign in with it too.',
+  confirmed: "Confirmed — protected actions are unlocked for 5 minutes.",
+};
+const OAUTH_ERRORS = {
+  state: 'The sign-in took too long or was interrupted. Please try again.',
+  denied: 'Sign-in was cancelled.',
+  provider: "The provider couldn't complete the sign-in. Please try again.",
+  no_email: "Your provider account didn't share an email address, so we can't create an account with it.",
+  link_required: 'An account with this email already exists. Log in with your password, then connect the provider under Sign-in methods.',
+  already_linked: 'That provider account is already connected to a different AAP account.',
+  provider_in_use: 'You already connected a different account from that provider. Disconnect it first.',
+  signup_limited: 'Too many sign-ups from your network. Please try again later.',
+  not_configured: "That sign-in option isn't enabled on this server.",
+  login_first: 'Please log in first.',
+  not_linked: "That provider isn't connected to your account.",
+  reauth_mismatch: 'Use the same provider account that is connected to this AAP account.',
+  reauth_stale: 'Please sign in again — the provider reused an earlier sign-in.',
+};
+// Outcome of a provider round trip arrives as ?oauth=… or ?oauth_error=….
+const oauthResult = (() => {
+  const q = new URLSearchParams(location.search);
+  const r = { ok: q.get('oauth'), error: q.get('oauth_error') };
+  if (r.ok || r.error) history.replaceState(null, '', location.pathname + location.hash);
+  return r;
+})();
 
 const REASON_LABELS = {
   unapproved_device_use: 'repeated use from unapproved devices',
@@ -76,6 +125,7 @@ function showDashboard(user) {
     $(id).placeholder = `Your password (${user.email})`;
   }
   $('pw-banner').classList.toggle('hidden', !user.mustChangePassword);
+  renderSignInMethods(user);
   $('verify-banner').classList.toggle('hidden', !!user.emailVerified);
   $('verify-email').textContent = user.email;
 
@@ -160,6 +210,98 @@ function showDashboard(user) {
     $('master-key').classList.add('hidden');
     $('master-once').classList.add('hidden');
   }
+}
+
+// --- Sign-in methods + confirmation for password-less accounts -------------------
+let currentUser = null;
+
+function reauthLink(provider, label) {
+  const a = document.createElement('a');
+  a.className = 'ghost small btn-link';
+  a.href = `/auth/oauth/${encodeURIComponent(provider)}/start?intent=reauth`;
+  a.textContent = label || `Confirm with ${PROVIDER_NAMES[provider] || provider}`;
+  return a;
+}
+
+function renderSignInMethods(user) {
+  currentUser = user;
+  const noPw = !user.hasPassword;
+  // Password inputs on protected forms only make sense with a password.
+  for (const id of ['rotate-password', 'protection-password', 'master-password', 'pw-current', 'methods-password']) {
+    $(id).classList.toggle('hidden', noPw);
+    $(id).required = !noPw && id !== 'methods-password';
+  }
+  $('pw-new').placeholder = noPw ? 'Choose a password (8+ chars)' : 'New password (8+ chars)';
+  $('password-form').querySelector('button[type=submit]').textContent = noPw ? 'Set password' : 'Change password';
+
+  $('reauth-banner').classList.toggle('hidden', !noPw);
+  if (noPw) {
+    $('reauth-state').textContent = user.confirmedUntil
+      ? `Confirmed until ${new Date(user.confirmedUntil).toLocaleTimeString()}.`
+      : 'Not confirmed right now.';
+    $('reauth-buttons').replaceChildren(...user.identities.map((i) => reauthLink(i.provider)));
+  }
+
+  const ul = $('methods-list');
+  ul.replaceChildren();
+  const item = (label, detail, action) => {
+    const li = document.createElement('li');
+    const name = document.createElement('strong');
+    name.textContent = label;
+    const d = document.createElement('span');
+    d.className = 'muted small';
+    d.textContent = detail;
+    li.append(name, d);
+    if (action) li.append(action);
+    ul.append(li);
+  };
+  item('Password', user.hasPassword ? 'Set' : 'Not set — you can add one in the Password card.');
+  const linked = Object.fromEntries(user.identities.map((i) => [i.provider, i]));
+  for (const p of user.oauthProviders || []) {
+    const l = linked[p.id];
+    const b = document.createElement('button');
+    b.className = 'ghost small';
+    b.textContent = l ? 'Disconnect' : 'Connect';
+    b.onclick = () => (l ? unlinkProvider(p) : linkProvider(p));
+    item(p.name, l ? `Connected${l.email ? ` as ${l.email}` : ''} · ${new Date(l.linkedAt).toLocaleDateString()}` : 'Not connected', b);
+  }
+  // Providers linked earlier but since disabled on the server still show.
+  for (const i of user.identities) {
+    if (!(user.oauthProviders || []).some((p) => p.id === i.provider)) {
+      item(PROVIDER_NAMES[i.provider] || i.provider, `Connected${i.email ? ` as ${i.email}` : ''} (sign-in currently disabled on this server)`);
+    }
+  }
+  $('methods-confirm').classList.toggle('hidden', noPw || !(user.oauthProviders || []).length);
+}
+
+/** Show a server error; offer provider confirmation when that's what's missing. */
+function showProtectedError(el, data, fallback) {
+  $(el).textContent = data.error || fallback;
+  if (data.reauthRequired) $('reauth-banner').scrollIntoView({ block: 'center' });
+}
+
+async function linkProvider(p) {
+  $('methods-error').textContent = '';
+  const { ok, data } = await api(`/auth/oauth/${encodeURIComponent(p.id)}/link`, {
+    method: 'POST',
+    body: JSON.stringify({ password: $('methods-password').value }),
+  });
+  $('methods-password').value = '';
+  if (!ok) return showProtectedError('methods-error', data, `Could not connect ${p.name}.`);
+  location.href = data.url; // to the provider, then back here
+}
+
+async function unlinkProvider(p) {
+  $('methods-error').textContent = '';
+  if (!confirm(`Disconnect ${p.name}? You won't be able to sign in with it any more.`)) return;
+  const { ok, data } = await api(`/auth/oauth/${encodeURIComponent(p.id)}/unlink`, {
+    method: 'POST',
+    body: JSON.stringify({ password: $('methods-password').value }),
+  });
+  $('methods-password').value = '';
+  if (!ok) return showProtectedError('methods-error', data, `Could not disconnect ${p.name}.`);
+  showToast(`${p.name} disconnected.`, 'info');
+  loadDashboard();
 }
 
 // --- Engine status + per-category usage --------------------------------------
@@ -487,10 +629,7 @@ $('rotate-form').onsubmit = async (e) => {
   const body = JSON.stringify({ password: $('rotate-password').value });
   const { ok, data } = await api('/auth/rotate-key', { method: 'POST', body });
   $('rotate-password').value = '';
-  if (!ok) {
-    $('rotate-error').textContent = data.error || 'Could not rotate key.';
-    return;
-  }
+  if (!ok) return showProtectedError('rotate-error', data, 'Could not rotate key.');
   loadDashboard(data.apiKey);
 };
 
@@ -505,8 +644,8 @@ $('password-form').onsubmit = async (e) => {
   const body = JSON.stringify({ currentPassword: $('pw-current').value, newPassword: $('pw-new').value });
   const { ok, data } = await api('/auth/change-password', { method: 'POST', body });
   for (const id of ['pw-current', 'pw-new', 'pw-confirm']) $(id).value = '';
-  if (!ok) { $('pw-error').textContent = data.error || 'Could not change password.'; return; }
-  $('pw-msg').textContent = `Password changed.${data.otherSessionsEnded ? ` Logged out ${data.otherSessionsEnded} other session(s).` : ''}`;
+  if (!ok) return showProtectedError('pw-error', data, 'Could not change password.');
+  $('pw-msg').textContent = `Password saved.${data.otherSessionsEnded ? ` Logged out ${data.otherSessionsEnded} other session(s).` : ''}`;
   loadDashboard();
 };
 
@@ -516,7 +655,7 @@ $('protection-form').onsubmit = async (e) => {
   const body = JSON.stringify({ action: $('protection-action').value, password: $('protection-password').value });
   const { ok, data } = await api('/auth/protection', { method: 'POST', body });
   $('protection-password').value = '';
-  if (!ok) { $('protection-error').textContent = data.error || 'Could not save.'; return; }
+  if (!ok) return showProtectedError('protection-error', data, 'Could not save.');
   loadDashboard();
 };
 
@@ -529,7 +668,7 @@ $('reveal-btn').onclick = async () => {
     return;
   }
   const password = $('rotate-password').value;
-  if (!password) {
+  if (!password && currentUser && currentUser.hasPassword) {
     $('rotate-error').textContent = 'Enter your current password to view the key.';
     return;
   }
@@ -545,8 +684,7 @@ $('reveal-btn').onclick = async () => {
       $('auth-error').textContent = data.error;
       return;
     }
-    $('rotate-error').textContent = data.error || 'Could not show key.';
-    return;
+    return showProtectedError('rotate-error', data, 'Could not show key.');
   }
   revealKey(data.apiKey);
 };
@@ -595,7 +733,7 @@ $('master-form').onsubmit = async (e) => {
   const body = JSON.stringify({ password: $('master-password').value });
   const { ok, data } = await api('/auth/org/master-key', { method: 'POST', body });
   $('master-password').value = '';
-  if (!ok) { $('master-error').textContent = data.error || 'Could not generate master key.'; return; }
+  if (!ok) return showProtectedError('master-error', data, 'Could not generate master key.');
   await loadDashboard();
   $('master-key').textContent = data.masterKey;
   $('master-key').classList.remove('hidden');
@@ -604,6 +742,15 @@ $('master-form').onsubmit = async (e) => {
 
 // --- On load: are we already logged in? ---
 loadDashboard().then(() => {
+  const onAuth = !$('auth-view').classList.contains('hidden');
   // Arriving from a "reset password" link in an email.
-  if (location.hash === '#forgot' && !$('auth-view').classList.contains('hidden')) showForgot();
+  if (location.hash === '#forgot' && onAuth) showForgot();
+  // Back from Google / GitHub / Microsoft.
+  if (oauthResult.error) {
+    const text = OAUTH_ERRORS[oauthResult.error] || 'Sign-in failed. Please try again.';
+    if (onAuth) $('auth-error').textContent = text;
+    else showToast(text, 'warn');
+  } else if (OAUTH_OK[oauthResult.ok]) {
+    showToast(OAUTH_OK[oauthResult.ok], 'info');
+  }
 });

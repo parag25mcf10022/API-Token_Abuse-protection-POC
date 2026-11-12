@@ -2,6 +2,31 @@
 
 All notable changes to this project. Dates are in YYYY-MM-DD.
 
+## 2026-11-12 (sign in with Google, GitHub, Microsoft)
+
+### Added
+- **Sign up and log in with Google, GitHub or Microsoft** (`oauth.js`, no
+  new dependency): authorization-code flow with PKCE, single-use `state`
+  kept server-side (10-minute lifetime), and OpenID `nonce`, audience and
+  `auth_time` checks. Each provider is enabled by its client ID/secret.
+- Accounts are matched by the provider's stable user id (Microsoft: tenant
+  + object id). A matching email links automatically only when both the
+  provider and our account have verified it — never for Microsoft, whose
+  email claim can't prove ownership ("nOAuth"). GitHub accounts without a
+  verified address verify their email with us.
+- **Password-less accounts**: protected actions (view/rotate key,
+  protection setting, master key, connect/disconnect providers, set a
+  password) need a fresh provider sign-in (`prompt=login`, `max_age=0`)
+  that lasts 5 minutes. Users can add a password at any time.
+- **Sign-in methods** card: connect (needs password or confirmation) and
+  disconnect providers. The last sign-in method can't be removed (checked
+  atomically). Connecting raises an `oauth_linked` alert and sends a new
+  "sign-in connected" email; disconnecting raises `oauth_unlinked`.
+- Admin panel shows each user's sign-in methods.
+- Rate limits: 20 starts and 20 callbacks per 15 min per IP, 10
+  connect/disconnect per hour per account; provider sign-ups share the
+  per-IP signup limit.
+
 ## 2026-11-12 (M3)
 
 ### Added (M3: email verification and recovery)

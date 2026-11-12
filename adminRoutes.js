@@ -54,6 +54,7 @@ function createAdminRouter({ db, usage, alerts, security, wrap, sessionsCol, cou
       id: u.id,
       email: u.email,
       emailVerified: u.emailVerified !== false,
+      signIn: [...(u.hasPassword !== false ? ['password'] : []), ...(u.identities || []).map((i) => i.provider)],
       isAdmin: !!u.isAdmin,
       orgId: u.orgId || null,
       orgRole: u.orgRole || null,

@@ -12,6 +12,7 @@
  *   unapproved_device_use — key used from a device the owner never approved
  *   auto_protect    — key automatically disabled/rotated (see protection.js)
  *   password_reset  — password reset through an emailed link
+ *   oauth_linked / oauth_unlinked — a Google/GitHub/Microsoft sign-in was connected/removed
  *
  * Noisy types are de-duplicated per user per day via `dedupeKey`.
  */

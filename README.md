@@ -166,6 +166,37 @@ under [Configuration](#configuration).
 CLI extras: `/usage` (quotas per category), `/model`, `/device`, `/clear`,
 `/save chat.md`, one-shot `python3 client.py -p "question"`, and `--no-stream`.
 
+### Sign in with Google, GitHub or Microsoft (optional)
+
+Each provider appears on the login page once its client ID and secret are set
+in `.env`. Register the app with the provider and use this **redirect URI**
+(replace the host with your `APP_URL` in production):
+
+| Provider | Where to register | Redirect URI | `.env` |
+|----------|-------------------|--------------|--------|
+| Google | [Google Cloud Console](https://console.cloud.google.com/apis/credentials) → Create credentials → OAuth client ID → *Web application* (set up the OAuth consent screen first; scopes `openid`, `email`, `profile`) | `http://localhost:3000/auth/oauth/google/callback` | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` |
+| GitHub | [GitHub → Settings → Developer settings → OAuth Apps](https://github.com/settings/developers) → New OAuth App | `http://localhost:3000/auth/oauth/github/callback` | `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET` |
+| Microsoft | [Microsoft Entra admin center → App registrations](https://entra.microsoft.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade) → New registration → *Accounts in any organizational directory and personal Microsoft accounts*, platform **Web**; then Certificates & secrets → New client secret | `http://localhost:3000/auth/oauth/microsoft/callback` | `MICROSOFT_CLIENT_ID` (Application ID), `MICROSOFT_CLIENT_SECRET` (the secret's *Value*), optional `MICROSOFT_TENANT` |
+
+Restart the server after editing `.env`.
+
+How accounts behave:
+
+- **Sign up and log in with one click.** A first sign-in creates the account.
+  Google and GitHub accounts with a verified email skip our email check;
+  Microsoft accounts always verify their email with us (Microsoft's email
+  claim can't prove ownership).
+- **Existing account with the same email:** linked automatically only when
+  both the provider and our account have verified the address (never for
+  Microsoft). Otherwise log in with your password and use **Sign-in methods →
+  Connect** on the dashboard.
+- **No password needed.** Accounts created with a provider confirm protected
+  actions (view/rotate key, protection setting, master key, connecting
+  providers, setting a password) by signing in with the provider again; that
+  confirmation lasts 5 minutes. They can add a password any time.
+- Connecting a provider needs your password (or that confirmation), alerts
+  admins and emails you. The last way to sign in can't be removed.
+
 ### Troubleshooting
 
 | Problem | Fix |
@@ -198,7 +229,8 @@ CLI extras: `/usage` (quotas per category), `/model`, `/device`, `/clear`,
 | **Alerts** | Raised for a new device, a new-IP login, a login lockout, a limit hit, a revoked key, and a password reset by email. Admins can revoke a key from an alert; the owner then generates the new one. |
 | **LLM engine** | Local Ollama by default, with no API costs and no data leaving the machine. Claude models can be the default or serve chosen categories, with prompt caching, automatic refusal fallbacks and per-model cost tracking. Replies are streamed, chats are multi-turn, and each category gets its own system prompt (the cyber prompt is defensive only). Admins can route categories to different models and allow or block LLM use per user or org. Real token counts are metered against limits. Simple commands and product questions stay local and instant. |
 | **Email (M3)** | **Verification at signup**: the API key works only after the owner clicks a one-time link (admin-created members get a welcome version naming their org). **Password reset by email** with a 30-minute single-use link; resetting ends every session. **Security emails** to the owner when their key is auto-locked or revoked, or their password changes — each type has its own template (purpose, details such as time and IP, next steps). Links carry the token in the URL fragment and are stored only as hashes. Security emails go only to verified addresses. Admins can mark an address verified by hand. |
-| **Strict rate limits** | Every `/auth` and `/api` route: 300/min per IP, and 120/min per logged-in account. Verification emails: 10/h per IP, 3/h per account. Verify links: 20 per 15 min per IP, locked after 5 bad links. Forgot password: 5/h per IP, 3 emails/h per address (excess silently dropped, so it can't probe for accounts). Reset: 10 per 15 min per IP, locked after 5 bad links. Plus login, key-view and API limits. All shared across instances. |
+| **Sign in with Google, GitHub, Microsoft** | One-click sign-up and login (authorization code + PKCE, `state`, OpenID `nonce`). Safe account linking (verified emails only, never Microsoft's claim), password-less accounts confirm protected actions with a fresh provider sign-in, connect/disconnect from the dashboard. Accounts are matched by the provider's stable user id. |
+| **Strict rate limits** | Every `/auth` and `/api` route: 300/min per IP, and 120/min per logged-in account. Verification emails: 10/h per IP, 3/h per account. Verify links: 20 per 15 min per IP, locked after 5 bad links. Forgot password: 5/h per IP, 3 emails/h per address (excess silently dropped, so it can't probe for accounts). Reset: 10 per 15 min per IP, locked after 5 bad links. Provider sign-in: 20 starts and 20 callbacks per 15 min per IP; connect/disconnect 10/h per account; sign-ups share the signup limit. Plus login, key-view and API limits. All shared across instances. |
 | **Hardening** | Rate limits, login lockout, CSP with Trusted Types, input validation, output encoding, no default credentials. |
 
 ## Org management (master key)
@@ -231,6 +263,10 @@ rejected.
 | POST | `/auth/verify-email` | one-time token | Confirm the email address (`{token}` from the link) |
 | POST | `/auth/forgot-password` | — | Email a reset link (same reply whether or not the account exists) |
 | POST | `/auth/reset-password` | one-time token | `{token, newPassword}`; ends every session |
+| GET | `/auth/oauth/providers` | — | Enabled sign-in providers |
+| GET | `/auth/oauth/{google,github,microsoft}/start` | — (`?intent=reauth`: session) | Redirect to the provider to sign in / sign up, or to confirm it's you |
+| GET | `/auth/oauth/{provider}/callback` | provider redirect | Finishes sign-in; returns to `/?oauth=…` or `/?oauth_error=…` |
+| POST | `/auth/oauth/{provider}/link` · `/unlink` | session + password (or fresh provider confirmation) | Connect or disconnect a provider |
 | POST | `/auth/notices/dismiss` | session | Mark one (`id`) or all quota notifications read |
 | GET/POST | `/auth/devices` · `/auth/devices/{approve,remove}` | session | Manage devices |
 | POST | `/auth/org/master-key` | org admin + password | New master key, shown once |
@@ -249,7 +285,11 @@ folder (git-ignored; see `.env.example`). Real environment variables win.
 |----------|---------|---------|
 | `RESEND_API_KEY` | unset | Sends email through [Resend](https://resend.com) (a send-only key is enough). Unset: emails are printed to the server console instead |
 | `EMAIL_FROM` | `"AAP" <onboarding@resend.dev>` | Sender. Resend's shared `onboarding@resend.dev` only delivers to your own Resend account's address; verify a domain in Resend to email anyone |
-| `APP_URL` | `http://localhost:$PORT` | Public URL used in email links |
+| `APP_URL` | `http://localhost:$PORT` | Public URL used in email links and OAuth redirect URIs |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | unset | Enables "Continue with Google" |
+| `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | unset | Enables "Continue with GitHub" |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` | unset | Enables "Continue with Microsoft" |
+| `MICROSOFT_TENANT` | `common` | `common`, `organizations`, `consumers`, or one tenant ID |
 | `PORT` | `3000` | HTTP port |
 | `MONGO_URL` / `MONGO_DB` | `mongodb://localhost:27017` / `AAP` | Database |
 | `SESSION_SECRET` | generated, stored in DB | Cookie signing |
@@ -279,6 +319,7 @@ usage.js         Usage metering and limit checks
 protection.js    Automatic disable/rotate on compromise signals
 alerts.js        Security alerts
 mailer.js        Email via Resend + one template per email type
+oauth.js         Sign-in with Google, GitHub, Microsoft (OAuth 2.0 / OIDC, PKCE)
 security.js      CSP headers, input validation
 rateLimit.js     Shared rate limiter (MongoDB-backed, atomic)
 engine.js        Response engine: rules, FAQ, LLM, content classifier
@@ -323,7 +364,7 @@ flowchart LR
 | **M2 — Shared rate limits** | Run more than one instance | ✅ IP limiter and lockouts in MongoDB · ✅ atomic quota enforcement (reserve → commit/release) · ✅ quota notices fire once across instances · ✅ auto-protection acts once across instances | ✅ Done |
 | **M3 — Email verification and recovery** | Production-ready accounts | ✅ Email verification at signup (Resend) · ✅ password reset by email · ✅ emails to the owner when a key is auto-locked or revoked, or the password changes · ✅ purpose-specific email templates · ✅ strict per-IP and per-account limits on every email flow | ✅ Done |
 | **M4 — Alerting and audit** | Visibility for admins | Webhook/Slack/email delivery for alerts; exportable audit log of admin actions and key use | ⏭️ Next |
-| **M5 — SSO** | Enterprise onboarding | OIDC/SAML login per org; automatic member provisioning | 📋 Planned |
+| **M5 — SSO** | Enterprise onboarding | ✅ Sign-in with Google, GitHub and Microsoft (personal accounts) · OIDC/SAML login per org; automatic member provisioning | 🚧 Started |
 | **M6 — Packaging** | Easy deployment | Docker Compose (app + MongoDB); automated test suite in CI | 📋 Planned |
 
 ## License

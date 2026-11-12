@@ -55,6 +55,12 @@ async function connect() {
   // SHA-256 hashes; expired ones are removed by TTL.
   await emailTokens.createIndex({ expiresAt: 1 }, { expireAfterSeconds: 0 });
   await emailTokens.createIndex({ userId: 1, purpose: 1 });
+  // Linked sign-in identities (Google/GitHub/Microsoft): one AAP account per
+  // provider account. key = "<provider>:<provider user id>".
+  await users.createIndex(
+    { 'identities.key': 1 },
+    { unique: true, partialFilterExpression: { 'identities.key': { $exists: true } } }
+  );
   // Accounts created before email verification existed are treated as verified.
   await users.updateMany({ emailVerified: { $exists: false } }, { $set: { emailVerified: true } });
   return db;
@@ -208,6 +214,8 @@ async function createUser(
     policy = null,
     mustChangePassword = false, // set when someone else chose the password
     emailVerified = false, // proven by clicking the emailed link
+    hasPassword = true, // false for accounts created by signing in with a provider
+    identities = [], // linked provider accounts
   } = {}
 ) {
   email = email.trim().toLowerCase();
@@ -232,6 +240,8 @@ async function createUser(
     policy: policy || DEFAULT_USER_POLICY,
     mustChangePassword: !!mustChangePassword,
     emailVerified: !!emailVerified,
+    hasPassword: !!hasPassword,
+    identities,
     knownIps: [],
     createdAt: new Date().toISOString(),
   };
@@ -301,7 +311,7 @@ function listUsers() {
  * account owner chose it, clearing any "must change password" requirement.
  */
 async function setPassword(userId, password, { ownChoice = false } = {}) {
-  const $set = { passwordHash: hashPassword(password) };
+  const $set = { passwordHash: hashPassword(password), hasPassword: true };
   if (ownChoice) $set.mustChangePassword = false;
   await users.updateOne({ id: Number(userId) }, { $set });
 }
@@ -362,6 +372,61 @@ async function setEmailVerified(userId) {
     { $set: { emailVerified: true, emailVerifiedAt: new Date() } }
   );
   return r.matchedCount === 1;
+}
+
+// --- Linked sign-in providers ---------------------------------------------------
+const identityKey = (provider, sub) => `${provider}:${sub}`;
+
+function getUserByIdentity(provider, sub) {
+  return users.findOne({ 'identities.key': identityKey(provider, sub) });
+}
+
+/** A new identity record for createUser / linkIdentity. */
+function identityDoc({ provider, sub, email }) {
+  return { key: identityKey(provider, sub), provider, email: email || null, linkedAt: new Date() };
+}
+
+/**
+ * Link a provider account to a user (at most one per provider). Returns
+ * 'linked', 'already_linked' (to this user), 'taken' (another user has it)
+ * or 'provider_in_use' (this user already linked a different account there).
+ */
+async function linkIdentity(userId, profile) {
+  const key = identityKey(profile.provider, profile.sub);
+  const owner = await users.findOne({ 'identities.key': key }, { projection: { id: 1 } });
+  if (owner) return owner.id === Number(userId) ? 'already_linked' : 'taken';
+  try {
+    const r = await users.updateOne(
+      { id: Number(userId), 'identities.provider': { $ne: profile.provider } },
+      { $push: { identities: identityDoc(profile) } }
+    );
+    return r.modifiedCount === 1 ? 'linked' : 'provider_in_use';
+  } catch (e) {
+    if (e.code === 11000) return 'taken'; // lost a race for the same account
+    throw e;
+  }
+}
+
+/**
+ * Unlink a provider. Refuses to remove the account's last way to sign in
+ * (no password and no other provider). Returns 'unlinked', 'not_linked' or
+ * 'last_method'.
+ */
+async function unlinkIdentity(userId, provider) {
+  const u = await users.findOne({ id: Number(userId) });
+  const ids = (u && u.identities) || [];
+  if (!ids.some((i) => i.provider === provider)) return 'not_linked';
+  // Only unlink if a password or another provider remains — checked in the
+  // same atomic update, so two concurrent unlinks can't strand the account.
+  const r = await users.updateOne(
+    {
+      id: Number(userId),
+      'identities.provider': provider,
+      $or: [{ hasPassword: { $ne: false } }, { 'identities.1': { $exists: true } }],
+    },
+    { $pull: { identities: { provider } } }
+  );
+  return r.modifiedCount === 1 ? 'unlinked' : 'last_method';
 }
 
 // --- Devices ---------------------------------------------------------------
@@ -656,6 +721,10 @@ module.exports = {
   listUsers,
   setKeyEnabled,
   setPassword,
+  getUserByIdentity,
+  identityDoc,
+  linkIdentity,
+  unlinkIdentity,
   issueEmailToken,
   consumeEmailToken,
   peekEmailToken,

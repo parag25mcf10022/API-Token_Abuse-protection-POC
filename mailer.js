@@ -242,6 +242,29 @@ const templates = {
       reason: `You received this because the password for ${email} changed.`,
     }),
 
+  /** A Google/GitHub/Microsoft sign-in was connected to the account. */
+  identityLinked: ({ email, provider, providerEmail, ip, automatic }) =>
+    compose({
+      theme: 'notice',
+      subject: `${provider} sign-in was connected to your AAP account`,
+      preheader: `You can now sign in to AAP with ${provider}${providerEmail ? ` (${providerEmail})` : ''}. Wasn't you? Act now.`,
+      title: `${provider} sign-in connected`,
+      intro: [
+        automatic
+          ? `Someone signed in to AAP with a ${provider} account that uses your verified email address, so it was connected to your account. You can now sign in with ${provider} as well.`
+          : `A ${provider} account was connected to your AAP account. You can now sign in with ${provider} as well.`,
+      ],
+      details: [['Account', email], [`${provider} account`, providerEmail], ['When', fmtTime()], ['From IP', ip]],
+      button: { label: 'Review sign-in methods', url: appUrl() },
+      stepsTitle: "Wasn't you? Do this now",
+      steps: [
+        `Log in and disconnect ${provider} under Sign-in methods.`,
+        'Reset your password, which logs everyone else out.',
+        'Tell your admin so they can review your account’s alerts.',
+      ],
+      reason: `You received this because a sign-in method was added to ${email}.`,
+    }),
+
   /** Automatic protection locked or rotated the key. */
   keyLocked: ({ email, reason, action, recovery, ip }) =>
     compose({
